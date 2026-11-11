@@ -82,7 +82,8 @@ public:
             for (const auto& setting:std::initializer_list<std::pair<D3DRENDERSTATETYPE,DWORD>>{
                 {D3DRS_ZENABLE,FALSE},{D3DRS_ZWRITEENABLE,FALSE},{D3DRS_STENCILENABLE,FALSE},
                 {D3DRS_ALPHABLENDENABLE,FALSE},{D3DRS_ALPHATESTENABLE,FALSE},{D3DRS_FOGENABLE,FALSE},
-                {D3DRS_SCISSORTESTENABLE,FALSE},{D3DRS_CLIPPLANEENABLE,0},{D3DRS_CULLMODE,D3DCULL_NONE},
+                {D3DRS_SCISSORTESTENABLE,FALSE},{D3DRS_CLIPPLANEENABLE,0},{D3DRS_WRAP0,0},
+                {D3DRS_CULLMODE,D3DCULL_NONE},
                 {D3DRS_FILLMODE,D3DFILL_SOLID},{D3DRS_COLORWRITEENABLE,15},{D3DRS_SRGBWRITEENABLE,FALSE}})
                 gpu_check(device_.SetRenderState(setting.first,setting.second),"Set isolated filter state");
             gpu_check(device_.SetVertexShader(nullptr),"Use transformed filter quad");

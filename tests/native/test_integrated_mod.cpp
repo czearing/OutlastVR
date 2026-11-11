@@ -515,7 +515,8 @@ int main(int argc,char** argv) {
             mode=="--comfort-fault-seated" || mode=="--comfort-fault-handedness" ||
             mode=="--comfort-fault-turn" || mode=="--snap" || mode=="--fault-snap" ||
             mode=="--flat-transitions" || mode=="--flat-upload" || mode=="--fault-flat-mono" ||
-            mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery")),
+            mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery" ||
+            mode=="--reset-retry" || mode=="--flat-wrap")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
@@ -523,7 +524,9 @@ int main(int argc,char** argv) {
         const bool flat_upload=mode=="--flat-upload";
         const bool input_chords=mode=="--input-chords";
         const bool input_recovery=mode=="--input-recovery";
-        mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono;
+        const bool reset_retry=mode=="--reset-retry";
+        const bool flat_wrap=mode=="--flat-wrap";
+        mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono || flat_wrap;
         mock.dynamic_ipd=mode=="--ipd-cycle";
         thread_handoff=mode=="--thread-handoff" || mode=="--ui-scaleform-handoff";
         thread_overlap=mode=="--thread-overlap";
@@ -722,6 +725,13 @@ int main(int argc,char** argv) {
                     throw std::runtime_error("Wrong-thread reset was not rejected");
                 }
                 p.PresentationInterval=D3DPRESENT_INTERVAL_ONE;
+                if (reset_retry) {
+                    auto invalid=p;invalid.BackBufferCount=UINT_MAX;
+                    require(integrated_device->Reset(&invalid)==D3DERR_INVALIDCALL,
+                        "Invalid reset parameters did not preserve the native failure");
+                    require(integrated_device->TestCooperativeLevel()==D3DERR_DEVICENOTRESET,
+                        "A failed native reset did not preserve recoverable device status");
+                }
                 gpu_check(integrated_device->Reset(&p),"Reset through native atlas and XR recovery hooks");
                 check_desktop_pacing();
                 gpu_check(integrated_device->SetRenderState(D3DRS_ZENABLE,FALSE),"Restore fixture depth after reset");
@@ -826,8 +836,22 @@ int main(int argc,char** argv) {
                     }
                 }
             };
-            auto present_frame=[&]{gpu_check(integrated_device->Present(nullptr,nullptr,nullptr,nullptr),
-                "Present through integrated XR submission");};
+            auto present_frame=[&]{
+                DWORD wrapping=0;
+                if (flat_wrap) {
+                    gpu_check(integrated_device->GetRenderState(D3DRS_WRAP0,&wrapping),"Save native frame wrapping");
+                    gpu_check(integrated_device->SetRenderState(D3DRS_WRAP0,D3DWRAP_U|D3DWRAP_V),
+                        "Set inherited native frame wrapping");
+                }
+                gpu_check(integrated_device->Present(nullptr,nullptr,nullptr,nullptr),
+                    "Present through integrated XR submission");
+                if (flat_wrap) {
+                    DWORD restored=0;
+                    gpu_check(integrated_device->GetRenderState(D3DRS_WRAP0,&restored),"Inspect native frame wrapping");
+                    require(restored==(D3DWRAP_U|D3DWRAP_V),"Stereo composition changed native wrapping state");
+                    gpu_check(integrated_device->SetRenderState(D3DRS_WRAP0,wrapping),"Restore frame fixture wrapping");
+                }
+            };
             auto run_thread=[](auto&& action) {
                 std::exception_ptr error;
                 std::thread worker([&]{try {action();}catch (...) {error=std::current_exception();}});
@@ -929,6 +953,11 @@ int main(int argc,char** argv) {
         if (input_recovery)
             std::cout<<"PASS: actual_dll_digital_recovery; held_primary_secondary_and_menu_suppressed; "
                 "fresh_press_after_release; focus_and_render_suspension; native_polls=20\n";
+        if (reset_retry)
+            std::cout<<"PASS: rejected_reset_preserves_native_error; native_device_not_reset; "
+                "successful_retry_rebuilds_stereo\n";
+        if (flat_wrap)
+            std::cout<<"PASS: inherited_texture_wrapping; native_state_preserved; stereo_flat_pixels_correct\n";
         if (mock.floor_startup_test)
             std::cout<<"PASS: floor_startup_frames=20; zero_height_deferred; cached_positive_pose_deferred; "
                 <<"tracked_zero_deferred; measured_height_acquired_once; crouched_height_preserved\n";

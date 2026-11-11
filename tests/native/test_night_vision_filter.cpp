@@ -37,6 +37,8 @@ int main() {
             gpu_check(device.SetViewport(&viewport),"Set caller viewport");
             gpu_check(device.SetScissorRect(&scissor),"Set caller scissor");
             gpu_check(device.SetRenderState(D3DRS_SCISSORTESTENABLE,TRUE),"Set caller scissor state");
+            const DWORD wrapping=repeat==0?0:repeat==1?D3DWRAP_U:repeat==2?D3DWRAP_V:D3DWRAP_U|D3DWRAP_V;
+            gpu_check(device.SetRenderState(D3DRS_WRAP0,wrapping),"Set caller texture wrapping");
             counter.reset();
             filter.draw(*target.get(),night_vision,vignette);
             gpu_check(device.GetRenderTargetData(target.get(),readback.get()),"Read real GPU filter result");
@@ -64,12 +66,14 @@ int main() {
             }
             gpu_check(readback->UnlockRect(),"Finish real GPU filter readback");
             if (!equal) throw std::runtime_error("Filter changed eye ownership, alpha or independent luminance oracle");
-            D3DVIEWPORT9 after{};RECT after_scissor{};DWORD enabled=0;
+            D3DVIEWPORT9 after{};RECT after_scissor{};DWORD enabled=0,after_wrapping=0;
             gpu_check(device.GetViewport(&after),"Read restored viewport");
             gpu_check(device.GetScissorRect(&after_scissor),"Read restored scissor");
             gpu_check(device.GetRenderState(D3DRS_SCISSORTESTENABLE,&enabled),"Read restored scissor state");
+            gpu_check(device.GetRenderState(D3DRS_WRAP0,&after_wrapping),"Read restored wrapping state");
             if (std::memcmp(&after,&viewport,sizeof(after)) ||
-                std::memcmp(&after_scissor,&scissor,sizeof(scissor)) || enabled!=TRUE)
+                std::memcmp(&after_scissor,&scissor,sizeof(scissor)) || enabled!=TRUE ||
+                after_wrapping!=wrapping)
                 throw std::runtime_error("Filter leaked graphics state into the native renderer");
             const auto draws=counter.events();
             if (draws.size()!=1 || draws[0].instances!=1) {

@@ -92,7 +92,10 @@ if(OLVR_GPU_TESTS)
         add_test(NAME test_integrated_input_recovery COMMAND test_integrated_mod
             "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --input-recovery)
         set_tests_properties(test_integrated_input_recovery PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
-        foreach(mode IN ITEMS transitions upload)
+        add_test(NAME test_integrated_reset_retry COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --reset-retry)
+        set_tests_properties(test_integrated_reset_retry PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        foreach(mode IN ITEMS transitions upload wrap)
             add_test(NAME test_integrated_flat_${mode} COMMAND test_integrated_mod
                 "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --flat-${mode})
             set_tests_properties(test_integrated_flat_${mode} PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)

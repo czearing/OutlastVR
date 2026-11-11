@@ -71,10 +71,16 @@ int main(int argc,char** argv) {
             if (fault) panel.reset();
             auto matrices=panel.locate(eyes,fovs,16.f/9);
             if (mono) matrices[1]=matrices[0];
+            const DWORD wrapping=frame%4==0?0:frame%4==1?D3DWRAP_U:
+                frame%4==2?D3DWRAP_V:D3DWRAP_U|D3DWRAP_V;
+            gpu_check(device.SetRenderState(D3DRS_WRAP0,wrapping),"Set native caller wrapping");
 #ifdef OLVR_ISOLATED_9ON12
             counter.reset();
 #endif
             renderer.draw(*source.get(),*output.get(),width,height,matrices);
+            DWORD after_wrapping=0;
+            gpu_check(device.GetRenderState(D3DRS_WRAP0,&after_wrapping),"Inspect restored panel wrapping");
+            if (after_wrapping!=wrapping) throw std::runtime_error("Panel changed native caller wrapping");
             gpu_check(device.GetRenderTargetData(output.get(),readback.get()),"Read spatial panel pixels");
             gpu_check(readback->LockRect(&lock,nullptr,D3DLOCK_READONLY),"Synchronize spatial panel pixels");
             bool correct=true;
