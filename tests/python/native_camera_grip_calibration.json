@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "source_capture": "native-gameplay016-normal-168-final",
+  "source_module_sha256": "A88E0C565DF5262CD3F480EC90E06195F263A226041EBA13FDF56CFA59876411",
+  "source_skeleton_sha256": "07606be06ea5d4b488f10e3a912ee04237b1074b7c6900320064262ffd5c1056",
+  "source_body_serial": 300,
+  "source_camera_frame": 554,
+  "asset": "handycam",
+  "wrist": 36,
+  "socket": 52,
+  "before_wrist": [0.499999613, -0.499999613, 0.499999613, 0.499999613, -67.4056854, -14.0296478, 179.516678, 1],
+  "before_socket": [0.102533072, -0.0406586155, -0.715556264, -0.689790964, -63.2760849, -11.7417831, 190.008591, 1],
+  "right_knuckle_position_bits": [
+    [1093292741, 1045645452, 1078670653],
+    [1093752412, 1045259595, 1062746374],
+    [1092568135, 1061237248, 3218570685],
+    [1091788471, 1046279497, 3229866410]
+  ],
+  "stock_original_local": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  "left_contact_policy": "reflect_model_Y",
+  "optical_policy": "immutable_anatomical_grip_minus_Z_plus_Y",
+  "limitation": "The native held pose supplies the model contact, not the optical orientation. Controller-facing optics and reflected left contact are the VR attachment design, not a claim about a stock left-hand animation."
+}

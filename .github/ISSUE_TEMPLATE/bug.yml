@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible Outlast VR problem
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Mod version
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Headset, OpenXR runtime and GPU
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include expected/actual behavior and whether the physical camcorder is enabled.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log excerpt
+      description: Remove personal paths. Do not upload game files or saves.
+      render: text
