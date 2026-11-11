@@ -22,6 +22,7 @@ add_executable(test_native_pixel_delta tests/native/test_native_pixel_delta.cpp)
 target_link_libraries(test_native_pixel_delta PRIVATE olvr_options)
 target_link_options(test_native_pixel_delta PRIVATE -municode)
 add_test(NAME launcher_help COMMAND OutlastVRLauncher --help)
+add_test(NAME launcher_version COMMAND OutlastVRLauncher --version)
 add_test(NAME launcher_unknown_option COMMAND OutlastVRLauncher --unknown)
 set_tests_properties(launcher_unknown_option PROPERTIES WILL_FAIL TRUE)
 
@@ -71,4 +72,4 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 add_test(NAME python_regressions COMMAND "${Python3_EXECUTABLE}" -m unittest discover
     -s "${PROJECT_SOURCE_DIR}/tests/python" -p "test_*.py")
 set_tests_properties(python_regressions PROPERTIES LABELS "python" TIMEOUT 180
-    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools/diagnostics;OLVR_PIXEL_DELTA_WRITER=$<TARGET_FILE:test_native_pixel_delta>")
+    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/tools/diagnostics;OLVR_PIXEL_DELTA_WRITER=$<TARGET_FILE:test_native_pixel_delta>;OLVR_RETAIL_EXECUTABLE=${OLVR_RETAIL_EXECUTABLE};OLVR_LAUNCHER=$<TARGET_FILE:OutlastVRLauncher>;OLVR_LOADER=$<TARGET_FILE:openxr_loader>")

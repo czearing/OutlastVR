@@ -1,6 +1,7 @@
 """Verify exactly the release files, manifest, DLL dependencies and safe preflight."""
 import argparse
 import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 from pathlib import Path
@@ -30,10 +31,17 @@ def verify(folder):
     if "\nphysical_camcorder=false\n" not in "\n" + config.replace("\r\n", "\n"):
         raise ValueError("Release config does not disable the experimental camcorder")
     # Restricted DLL search proves the package does not rely on the developer's PATH.
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.FreeLibrary.argtypes = [wintypes.HMODULE]
+    kernel.FreeLibrary.restype = wintypes.BOOL
     for name in ("openxr_loader.dll", "OutlastVRSinglePass.dll"):
         library = ctypes.WinDLL(str(folder / name), winmode=0x100 | 0x800)
         export = "xrGetInstanceProcAddr" if name == "openxr_loader.dll" else "OutlastVR_Initialize"
-        getattr(library, export)
+        try:
+            getattr(library, export)
+        finally:
+            if not kernel.FreeLibrary(library._handle):
+                raise ctypes.WinError(ctypes.get_last_error())
     help_result = subprocess.run([str(folder / "OutlastVRLauncher.exe"), "--help"],
                                  capture_output=True, text=True, check=True)
     if "Outlast VR" not in help_result.stdout or "--verify" not in help_result.stdout:

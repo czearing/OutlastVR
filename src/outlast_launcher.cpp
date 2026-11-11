@@ -124,10 +124,15 @@ int wmain(int argc,wchar_t** argv) {
         for (int i=1;i<argc;++i) {
             const std::wstring option=argv[i];
             if (!options.insert(option).second) throw std::invalid_argument("Duplicate launcher option");
+            if (option==L"--version") {
+                std::cout<<"Outlast VR "<<OLVR_VERSION<<'\n';
+                return 0;
+            }
             if (option==L"--help") {
                 std::cout<<"Outlast VR\nUsage: OutlastVRLauncher.exe [--game \"path\\to\\OLGame.exe\"] "
                     "[--verify | --native-resolution | --headless-verify new-absolute-directory]\n"
-                    "Settings: OutlastVR.ini beside the launcher. --verify never starts the game.\n";
+                    "Settings: OutlastVR.ini beside the launcher. --verify never starts the game.\n"
+                    "--version prints the mod's base version.\n";
                 return 0;
             }
             if (option==L"--game" || option==L"--headless-verify") {
@@ -153,8 +158,17 @@ int wmain(int argc,wchar_t** argv) {
         const auto offset=reinterpret_cast<std::uintptr_t>(initialize)-reinterpret_cast<std::uintptr_t>(mapped);
         FreeLibrary(mapped);
         check(initialize!=nullptr,"Resolve explicit mod initialization export");
+        if (!headless) {
+            const auto loader=config.openxr_loader.empty()?folder/L"openxr_loader.dll":
+                olvr::config_path(folder,config.openxr_loader);
+            mapped=LoadLibraryExW(loader.c_str(),nullptr,DONT_RESOLVE_DLL_REFERENCES);
+            check(mapped!=nullptr,"Read configured OpenXR loader; extract every release file or correct vr.openxr_loader");
+            const auto entry=GetProcAddress(mapped,"xrGetInstanceProcAddr");
+            FreeLibrary(mapped);
+            check(entry!=nullptr,"Configured OpenXR loader is missing xrGetInstanceProcAddr");
+        }
         if (verify) {
-            std::cout<<"PASS: exact retail SHA256 and mod initialization export; no game process created\n";
+            std::cout<<"PASS: exact retail SHA256, mod export and OpenXR loader; no game process created\n";
             return 0;
         }
         std::filesystem::path evidence;

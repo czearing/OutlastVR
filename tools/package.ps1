@@ -9,6 +9,10 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {throw 'Invalid re
 $cmake = Get-Content -LiteralPath (Join-Path $root 'CMakeLists.txt') -Raw
 if ($cmake -notmatch 'project\(OutlastVR VERSION (\d+\.\d+\.\d+)') {throw 'Project version missing'}
 if (($Version -split '-')[0] -ne $Matches[1]) {throw 'Release tag and CMake project version disagree'}
+$commit = & git -C $root rev-parse HEAD 2>$null
+if ($LASTEXITCODE -ne 0) {throw 'Packages must identify a committed source revision'}
+$dirty = & git -C $root status --porcelain --untracked-files=normal
+if ($LASTEXITCODE -ne 0 -or $dirty) {throw 'Commit source changes before creating a release package'}
 $build = [IO.Path]::GetFullPath((Join-Path $root $BuildDirectory))
 $output = [IO.Path]::GetFullPath((Join-Path $root $OutputDirectory))
 $stage = Join-Path $output "OutlastVR-$Version-win64"
@@ -29,8 +33,6 @@ if (@(Compare-Object ($expected | Sort-Object) ($relative | Sort-Object)).Count)
 if ((Get-Content -LiteralPath (Join-Path $stage 'OutlastVR.ini') -Raw) -notmatch '(?m)^physical_camcorder=false\r?$') {
     throw 'Release must default to the simple night-vision filter'
 }
-$commit = & git -C $root rev-parse HEAD 2>$null
-if ($LASTEXITCODE -ne 0) {throw 'Packages must identify a committed source revision'}
 $manifest = [ordered]@{
     name = 'Outlast VR'
     version = $Version
