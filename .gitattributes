@@ -6,3 +6,5 @@
 *.yml text eol=lf
 *.ps1 text eol=crlf
 *.json text eol=lf
+# This retained calibration is verified by its original byte digest.
+tests/python/native_camera_grip_calibration.json -text whitespace=cr-at-eol
