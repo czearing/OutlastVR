@@ -20,7 +20,7 @@ foreach(name IN ITEMS
     test_headlocked_ui test_world_scissor test_outlast_native_view)
     olvr_test(${name})
 endforeach()
-foreach(mode IN ITEMS pause-chord fallback-gestures)
+foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery)
     string(REPLACE "-" "_" test_mode "${mode}")
     add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})
     set_tests_properties(test_input_${test_mode} PROPERTIES LABELS "cpu" TIMEOUT 120)
@@ -89,6 +89,9 @@ if(OLVR_GPU_TESTS)
         add_test(NAME test_integrated_input_chords COMMAND test_integrated_mod
             "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --input-chords)
         set_tests_properties(test_integrated_input_chords PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME test_integrated_input_recovery COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --input-recovery)
+        set_tests_properties(test_integrated_input_recovery PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
         foreach(mode IN ITEMS transitions upload)
             add_test(NAME test_integrated_flat_${mode} COMMAND test_integrated_mod
                 "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --flat-${mode})

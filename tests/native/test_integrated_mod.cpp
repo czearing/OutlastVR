@@ -515,13 +515,14 @@ int main(int argc,char** argv) {
             mode=="--comfort-fault-seated" || mode=="--comfort-fault-handedness" ||
             mode=="--comfort-fault-turn" || mode=="--snap" || mode=="--fault-snap" ||
             mode=="--flat-transitions" || mode=="--flat-upload" || mode=="--fault-flat-mono" ||
-            mode=="--ipd-cycle" || mode=="--input-chords")),
+            mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
         fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono" || fault_flat_mono;
         const bool flat_upload=mode=="--flat-upload";
         const bool input_chords=mode=="--input-chords";
+        const bool input_recovery=mode=="--input-recovery";
         mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono;
         mock.dynamic_ipd=mode=="--ipd-cycle";
         thread_handoff=mode=="--thread-handoff" || mode=="--ui-scaleform-handoff";
@@ -656,8 +657,6 @@ int main(int argc,char** argv) {
         motion_mock::fake.fixture_aim_tracked=!mock.flat_test;
         motion_mock::fake.fixture_use=.75f;
         motion_mock::fake.fixture_grab={.25f,.75f};
-        motion_mock::fake.fixture_jump=motion_mock::fake.fixture_nv=!comfort_mode && !input_chords;
-        motion_mock::fake.fixture_notes=motion_mock::fake.fixture_sprint=comfort_mode;
         motion_mock::fake.fixture_move=comfort_mode?XrVector2f{-.4f,.6f}:XrVector2f{.3f,.6f};
         motion_mock::fake.fixture_turn=comfort_mode?XrVector2f{.3f,.6f}:
             XrVector2f{-.4f,input_chords?0.f:.6f};
@@ -671,17 +670,30 @@ int main(int argc,char** argv) {
             if (snap_mode) motion_mock::fake.fixture_turn.x=f==1?1.f:0.f;
             motion_mock::fake.fixture_crouch=!comfort_mode && f!=6 && f!=12;
             motion_mock::fake.fixture_reload=comfort_mode && f!=6 && f!=12;
-            if (input_chords) {
+            if (!input_chords) {
+                const bool fresh=f==1 || f==7 || f==13;
+                motion_mock::fake.fixture_jump=motion_mock::fake.fixture_nv=!comfort_mode && fresh;
+                motion_mock::fake.fixture_notes=motion_mock::fake.fixture_sprint=comfort_mode && fresh;
+            }
+            if (input_recovery) {
+                const bool held=f!=0 && f!=6 && f!=12 && f!=18;
+                motion_mock::fake.fixture_notes=motion_mock::fake.fixture_jump=held;
+                motion_mock::fake.fixture_reload=motion_mock::fake.fixture_crouch=held;
+                motion_mock::fake.fixture_menu=held;
+                motion_mock::fake.fixture_sprint=motion_mock::fake.fixture_nv=false;
+                motion_mock::fake.fixture_use=0;
+                motion_mock::fake.fixture_move=motion_mock::fake.fixture_turn={};
+            } else if (input_chords) {
                 const unsigned step=f+1;
                 motion_mock::fake.fixture_sprint=step==2 || step==6 || step==7 ||
-                    (step>=16 && step<=18);
+                    (step>=17 && step<=19);
                 motion_mock::fake.fixture_nv=step==2 || step==3 || step==6 || step==9;
-                motion_mock::fake.fixture_crouch=step==11 || step==12;
-                motion_mock::fake.fixture_reload=step==11 || step==14;
+                motion_mock::fake.fixture_crouch=step==12 || step==13;
+                motion_mock::fake.fixture_reload=step==12;
                 motion_mock::fake.menu_button=step<11 || step>=16;
                 motion_mock::fake.face_buttons=step<16;
-                motion_mock::fake.fixture_move=step==16?XrVector2f{0,1}:
-                    step==17?XrVector2f{}:step==18 || step==19?XrVector2f{0,-1}:XrVector2f{.3f,.6f};
+                motion_mock::fake.fixture_move=step==17?XrVector2f{0,1}:
+                    step==18?XrVector2f{}:step==19?XrVector2f{0,-1}:XrVector2f{.3f,.6f};
             }
             if (camera_bob) {
                 auto animated=frame;
@@ -869,12 +881,23 @@ int main(int argc,char** argv) {
                     motion_mock::fake.last_haptic[hand].frequency==XR_FREQUENCY_UNSPECIFIED,
                     "Native motor output changed amplitude, duration or focus before XR submission");
             const auto& pad=observed_gamepad.Gamepad;
+            if (input_recovery) {
+                const WORD expected=f==1 || f==7 || f==13?
+                    XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_B|XINPUT_GAMEPAD_Y|
+                    XINPUT_GAMEPAD_BACK|XINPUT_GAMEPAD_START:0;
+                require(pad.wButtons==expected && pad.sThumbLX==0 && pad.sThumbLY==0 &&
+                    pad.sThumbRX==0 && pad.sThumbRY==0,
+                    "Actual DLL replayed a held digital action or lost a fresh press at frame "+
+                    std::to_string(f+1)+"; buttons="+std::to_string(pad.wButtons)+
+                    "; expected="+std::to_string(expected));
+                continue;
+            }
             if (input_chords) {
                 const unsigned step=f+1;
-                const WORD expected=step==9?XINPUT_GAMEPAD_RIGHT_THUMB:step==11?XINPUT_GAMEPAD_START:
-                    step==14?XINPUT_GAMEPAD_Y:step>=16 && step<=18?XINPUT_GAMEPAD_BACK:0;
-                const SHORT expected_x=step>=16 && step<=19?0:9830;
-                const SHORT expected_y=step>=16 && step<=18?0:step==19?-32768:19660;
+                const WORD expected=step==9?XINPUT_GAMEPAD_RIGHT_THUMB:step==12?XINPUT_GAMEPAD_START:
+                    step>=17 && step<=19?XINPUT_GAMEPAD_BACK:0;
+                const SHORT expected_x=step>=17 && step<=19?0:9830;
+                const SHORT expected_y=step>=17 && step<=19?0:19660;
                 require(pad.wButtons==expected &&
                     pad.sThumbLX==(active?expected_x:0) && pad.sThumbLY==(active?expected_y:0) &&
                     pad.sThumbRX==(active?-13107:0) && pad.sThumbRY==0,
@@ -888,7 +911,7 @@ int main(int argc,char** argv) {
             require(active?(std::abs(pad.sThumbLX-move_x)<=1 && std::abs(pad.sThumbLY-move_y)<=1 &&
                 pad.sThumbRX==((comfort_mode || snap_mode)?0:-13107) && pad.sThumbRY==0 &&
                 (pad.wButtons&(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X|XINPUT_GAMEPAD_RIGHT_THUMB))==
-                (XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_RIGHT_THUMB) &&
+                ((f==1 || f==7 || f==13)?XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_RIGHT_THUMB:0) &&
                 !(pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)):
                 pad.wButtons==0 && pad.sThumbLX==0 && pad.sThumbRX==0,
                 "Native motion action/focus/skipped-frame or unavailable-body use isolation failed");
@@ -898,10 +921,14 @@ int main(int argc,char** argv) {
             crouch_edges+=crouch_edge;
         }
         require(motion_polls==20,"Native motion polling proof truncated");
-        require(input_chords || crouch_edges==2,"Fresh manual crouch edges were not exercised through the actual DLL");
+        require(input_chords || input_recovery || crouch_edges==2,
+            "Fresh manual crouch edges were not exercised through the actual DLL");
         if (input_chords)
             std::cout<<"PASS: actual_dll_input_chords; both_stick_release_orders; pause_release_tail; "
                 "held_pad_sector; fresh_actions_recovered; native_polls=20\n";
+        if (input_recovery)
+            std::cout<<"PASS: actual_dll_digital_recovery; held_primary_secondary_and_menu_suppressed; "
+                "fresh_press_after_release; focus_and_render_suspension; native_polls=20\n";
         if (mock.floor_startup_test)
             std::cout<<"PASS: floor_startup_frames=20; zero_height_deferred; cached_positive_pose_deferred; "
                 <<"tracked_zero_deferred; measured_height_acquired_once; crouched_height_preserved\n";

@@ -29,11 +29,12 @@ struct Fake {
     std::array<XrHapticVibration,2> last_haptic{};
     std::array<bool,2> vibrating{};
     bool focused=true,active=true,lost_left=false,bad_pose=false,bad_axis=false,partial_failure=false;
+    std::array<bool,2> hand_active{{true,true}};
     bool stale_fault=false,swap_fault=false,all_unsupported=false;
     std::string supported_profile;
     unsigned accepted_profiles=0;
     bool neutral_controls=false,estimated_left=false;
-    bool face_buttons=true,menu_button=true;
+    bool face_buttons=true,menu_button=true,stick_buttons=true;
     bool fixture_crouch=false,fixture_notes=false,fixture_menu=false;
     float fixture_use=0;
     std::array<float,2> fixture_grab{};
@@ -47,6 +48,7 @@ struct Fake {
     std::array<XrQuaternionf,2> fixture_aim_rotations{{{0,0,0,1},{0,0,0,1}}};
     XrTime first_time=0;
     bool left(XrPath path) const {return path==paths.at("/user/hand/left");}
+    bool active_hand(XrPath path) const {return active && hand_active[left(path)?0:1];}
 } fake;
 
 XrResult XRAPI_CALL string_path(XrInstance instance,const char* text,XrPath* out) {
@@ -118,11 +120,12 @@ void query(const XrActionStateGetInfo* info,XrActionType type) {
 }
 XrResult XRAPI_CALL pose_state(XrSession,const XrActionStateGetInfo* info,XrActionStatePose* out) {
     query(info,XR_ACTION_TYPE_POSE_INPUT);
-    out->isActive=fake.active;return XR_SUCCESS;
+    out->isActive=fake.active_hand(info->subactionPath);return XR_SUCCESS;
 }
 XrResult XRAPI_CALL float_state(XrSession,const XrActionStateGetInfo* info,XrActionStateFloat* out) {
     query(info,XR_ACTION_TYPE_FLOAT_INPUT);
-    out->isActive=fake.active;out->currentState=fake.neutral_controls?0:fake.left(info->subactionPath)?.25f:.75f;
+    out->isActive=fake.active_hand(info->subactionPath);
+    out->currentState=fake.neutral_controls?0:fake.left(info->subactionPath)?.25f:.75f;
     if (fake.neutral_controls && !fake.left(info->subactionPath) &&
         fake.actions.at(info->action).first=="trigger") out->currentState=fake.fixture_use;
     if (fake.neutral_controls && fake.actions.at(info->action).first=="squeeze")
@@ -131,10 +134,12 @@ XrResult XRAPI_CALL float_state(XrSession,const XrActionStateGetInfo* info,XrAct
 }
 XrResult XRAPI_CALL bool_state(XrSession,const XrActionStateGetInfo* info,XrActionStateBoolean* out) {
     query(info,XR_ACTION_TYPE_BOOLEAN_INPUT);
-    out->isActive=fake.active;out->currentState=!fake.neutral_controls && !fake.left(info->subactionPath);
+    out->isActive=fake.active_hand(info->subactionPath);
+    out->currentState=!fake.neutral_controls && !fake.left(info->subactionPath);
     const auto& name=fake.actions.at(info->action).first;
     if ((!fake.face_buttons && (name=="primary" || name=="secondary")) ||
-        (!fake.menu_button && name=="menu")) out->isActive=XR_FALSE;
+        (!fake.menu_button && name=="menu") ||
+        (!fake.stick_buttons && name=="stick_click")) out->isActive=XR_FALSE;
     if (fake.neutral_controls) {
         const auto& action=fake.actions.at(info->action).first;
         const bool left=fake.left(info->subactionPath);
@@ -151,7 +156,8 @@ XrResult XRAPI_CALL vector_state(XrSession,const XrActionStateGetInfo* info,XrAc
     query(info,XR_ACTION_TYPE_VECTOR2F_INPUT);
     const bool move=fake.actions.at(info->action).first=="move";
     expect(fake.left(info->subactionPath)==move,"Move and turn sticks switched hands");
-    out->isActive=fake.active;out->currentState={move?.3f:-.4f,fake.bad_axis?1.5f:.6f};
+    out->isActive=fake.active_hand(info->subactionPath);
+    out->currentState={move?.3f:-.4f,fake.bad_axis?1.5f:.6f};
     if (fake.neutral_controls) out->currentState=move?fake.fixture_move:fake.fixture_turn;
     return XR_SUCCESS;
 }
@@ -226,11 +232,107 @@ int main(int argc,char** argv) {
         const std::string mode=argc==2?argv[1]:"";
         const bool pause_test=mode=="--pause-chord";
         const bool sector_test=mode=="--fallback-gestures";
+        const bool recovery_test=mode=="--button-recovery";
         if (argc==2) {
             fake.stale_fault=std::strcmp(argv[1],"--fault-stale")==0;
             fake.swap_fault=std::strcmp(argv[1],"--fault-hands")==0;
-            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test,"Unknown motion control");
+            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test || recovery_test,
+                "Unknown motion control");
         } else expect(argc==1,"Invalid motion test arguments");
+        if (recovery_test) {
+            enum class Kind {primary,secondary,menu,click};
+            struct Case {const char* name;unsigned hand;bool Fake::*pressed;Kind kind;float sector;};
+            const Case cases[]{
+                {"left-primary",0,&Fake::fixture_notes,Kind::primary,0},
+                {"right-primary",1,&Fake::fixture_jump,Kind::primary,0},
+                {"left-secondary",0,&Fake::fixture_reload,Kind::secondary,0},
+                {"right-secondary",1,&Fake::fixture_crouch,Kind::secondary,0},
+                {"menu",0,&Fake::fixture_menu,Kind::menu,0},
+                {"left-click",0,&Fake::fixture_sprint,Kind::click,0},
+                {"right-click",1,&Fake::fixture_nv,Kind::click,0},
+                {"left-pad-primary",0,&Fake::fixture_sprint,Kind::primary,1},
+                {"right-pad-primary",1,&Fake::fixture_nv,Kind::primary,1},
+                {"left-pad-secondary",0,&Fake::fixture_sprint,Kind::secondary,-1},
+                {"right-pad-secondary",1,&Fake::fixture_nv,Kind::secondary,-1}};
+            unsigned scenarios=0;
+            for (const auto& test:cases) for (unsigned interruption=0;interruption<4;++interruption)
+                for (const bool held_before:{false,true}) {
+                    fake=Fake{};fake.neutral_controls=true;fake.face_buttons=!test.sector;
+                    auto& held=fake.*test.pressed;
+                    (test.hand?fake.fixture_turn:fake.fixture_move)=test.kind==Kind::click?
+                        XrVector2f{.3f,.4f}:XrVector2f{0,test.sector};
+                    {
+                        OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                        auto pressed=[&](const MotionFrame& frame) {
+                            const auto& hand=frame.hands[test.hand];
+                            return test.kind==Kind::menu?frame.menu:test.kind==Kind::primary?hand.primary:
+                                test.kind==Kind::secondary?hand.secondary:hand.stick_click;
+                        };
+                        input.sample(fake.base,1000);
+                        held=held_before;
+                        expect(pressed(input.sample(fake.base,2000))==held_before,
+                            "Initial digital action did not match its physical button");
+                        if (interruption==0) fake.focused=false;
+                        if (interruption==1) input.suspend();
+                        if (interruption==2) fake.hand_active[test.hand]=false;
+                        if (interruption==3) {
+                            if (test.sector) fake.face_buttons=true;
+                            else if (test.kind==Kind::menu) fake.menu_button=false;
+                            else if (test.kind==Kind::click) fake.stick_buttons=false;
+                            else fake.face_buttons=false;
+                        }
+                        if (interruption!=1)
+                            expect(!pressed(input.sample(fake.base,3000)),
+                                "An unavailable digital action retained input");
+                        held=true;
+                        fake.focused=true;fake.hand_active[test.hand]=true;
+                        fake.face_buttons=!test.sector;fake.menu_button=fake.stick_buttons=true;
+                        for (const XrTime time:{4000,4100}) {
+                            const auto frame=input.sample(fake.base,time);
+                            expect(!pressed(frame),
+                                (std::string("Held ")+test.name+" replayed after recovery; interruption="+
+                                    std::to_string(interruption)+"; held_before="+std::to_string(held_before)).c_str());
+                            if (test.kind==Kind::click && interruption<2) {
+                                const auto axis=test.hand?frame.turn:frame.move;
+                                expect(axis.x==.3f && axis.y==.4f,
+                                    "Rearming a normal stick click disabled its movement axis");
+                            }
+                        }
+                        held=false;
+                        expect(!pressed(input.sample(fake.base,5000)),"Button release generated a press");
+                        held=true;
+                        expect(pressed(input.sample(fake.base,6000)),
+                            "A fresh digital press remained blocked after recovery");
+                    }
+                    expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                        "Button-recovery test leaked controller resources");
+                    ++scenarios;
+                }
+            fake=Fake{};fake.neutral_controls=true;
+            {
+                OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                input.sample(fake.base,1000);
+                fake.hand_active[0]=false;input.sample(fake.base,2000);
+                fake.fixture_notes=fake.fixture_jump=true;
+                auto frame=input.sample(fake.base,3000);
+                expect(!frame.hands[0].primary && frame.hands[1].primary,
+                    "One missing controller disabled the other hand's fresh input");
+                fake.hand_active[0]=true;
+                expect(!input.sample(fake.base,4000).hands[0].primary,
+                    "An inactive hand's press replayed on reconnection");
+                fake.fixture_notes=false;input.sample(fake.base,5000);
+                fake.fixture_notes=true;fake.lost_left=true;
+                frame=input.sample(fake.base,6000);
+                expect(frame.hands[0].primary && !frame.hands[0].grip_tracked,
+                    "Optical pose loss incorrectly disabled an active controller button");
+            }
+            expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                "Per-hand recovery test leaked controller resources");
+            std::cout<<"PASS: digital_button_recovery_scenarios="<<scenarios
+                <<"; focus_suspend_hand_activity_profile; held_and_unseen_presses; "
+                <<"fresh_release_rearm; independent_hands; optical_loss_preserves_buttons\n";
+            return 0;
+        }
         if (pause_test || sector_test) {
             fake.neutral_controls=true;fake.menu_button=!pause_test;fake.face_buttons=pause_test;
             {
@@ -353,6 +455,7 @@ int main(int argc,char** argv) {
             expect(!released.hands[0].stick_click && !released.hands[1].primary,
                 "Native jump/sprint fixture retained released inputs");
             fake.face_buttons=false;fake.menu_button=false;
+            input.sample(fake.base,3740);
             fake.fixture_sprint=fake.fixture_nv=true;
             fake.fixture_move={0,1};fake.fixture_turn={0,-1};
             const auto pads=input.sample(fake.base,3750);

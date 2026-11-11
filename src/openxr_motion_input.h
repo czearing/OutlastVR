@@ -34,6 +34,10 @@ class OpenXRMotionInput {
     mutable std::array<bool,2> vibrating_{};
     enum class ClickGesture {none,primary,secondary,center,blocked};
     mutable std::array<ClickGesture,2> click_gestures_{};
+    enum class ClickBindings {unknown,face,fallback};
+    mutable std::array<ClickBindings,2> click_bindings_{};
+    mutable std::array<bool,2> primary_blocked_{},secondary_blocked_{},click_blocked_{};
+    mutable bool menu_blocked_=false;
     mutable bool pause_consuming_=false,pause_armed_=true;
     mutable std::array<bool,2> pause_clicks_{};
 #define OLVR_MOTION_FUNCTIONS(F) \
@@ -92,6 +96,11 @@ class OpenXRMotionInput {
         xr_check(GetActionStateBoolean_(session_,&info,&state),"Read controller button");
         if (available) *available=state.isActive!=XR_FALSE;
         return state.isActive && state.currentState;
+    }
+    static bool rearmed_button(bool down,bool available,bool& blocked) {
+        if (!available) blocked=true;
+        else if (!down) blocked=false;
+        return down && !blocked;
     }
     XrVector2f stick(XrAction action,unsigned hand) const {
         const auto info=query(action,hand);
@@ -238,7 +247,8 @@ public:
         xr_check(result,"Synchronize motion controls");
         frame.focused=true;frame.move=stick(move_,0);frame.turn=stick(turn_,1);
         bool menu_available=false;
-        frame.menu=button(menu_,0,&menu_available);
+        const bool raw_menu=button(menu_,0,&menu_available);
+        frame.menu=rearmed_button(raw_menu,menu_available,menu_blocked_);
         std::array<bool,2> secondary_down{},secondary_clicks{};
         for (unsigned hand=0;hand<2;++hand) {
             auto& value=frame.hands[hand];
@@ -246,30 +256,36 @@ public:
             value.aim_tracked=pose(aim_,aims_[hand],hand,base,time,value.aim);
             value.trigger=scalar(trigger_,hand);value.squeeze=scalar(squeeze_,hand);
             bool primary_available=false,secondary_available=false;
-            value.primary=button(primary_,hand,&primary_available);
-            value.secondary=button(secondary_,hand,&secondary_available);
+            const bool raw_primary=button(primary_,hand,&primary_available);
+            const bool raw_secondary=button(secondary_,hand,&secondary_available);
+            value.primary=rearmed_button(raw_primary,primary_available,primary_blocked_[hand]);
+            value.secondary=rearmed_button(raw_secondary,secondary_available,secondary_blocked_[hand]);
+            const bool fallback=!primary_available && !secondary_available;
+            const auto bindings=fallback?ClickBindings::fallback:ClickBindings::face;
+            if (click_bindings_[hand]!=ClickBindings::unknown && click_bindings_[hand]!=bindings)
+                click_blocked_[hand]=true;
+            click_bindings_[hand]=bindings;
             bool click_available=false;
-            value.stick_click=button(stick_,hand,&click_available);
-            const bool raw_click=value.stick_click;
+            const bool raw_click=button(stick_,hand,&click_available);
+            value.stick_click=rearmed_button(raw_click,click_available,click_blocked_[hand]);
             auto& gesture=click_gestures_[hand];
             auto& axis=hand?frame.turn:frame.move;
-            const bool fallback=!primary_available && !secondary_available;
-            if (!click_available) gesture=ClickGesture::blocked;
-            else if (!value.stick_click) gesture=ClickGesture::none;
+            if (!click_available || (fallback && click_blocked_[hand])) gesture=ClickGesture::blocked;
+            else if (!raw_click) gesture=ClickGesture::none;
             else if (fallback && gesture==ClickGesture::none) {
                 gesture=std::abs(axis.y)>.55f && std::abs(axis.y)>std::abs(axis.x)?
                     (axis.y>0?ClickGesture::primary:ClickGesture::secondary):ClickGesture::center;
             }
             else if (!fallback && (gesture==ClickGesture::primary || gesture==ClickGesture::secondary))
                 gesture=ClickGesture::blocked;
-            if (value.stick_click && gesture!=ClickGesture::none && gesture!=ClickGesture::center) {
+            if (raw_click && gesture!=ClickGesture::none && gesture!=ClickGesture::center) {
                 if (gesture==ClickGesture::primary) value.primary=true;
                 if (gesture==ClickGesture::secondary) value.secondary=true;
                 value.stick_click=false;axis={};
             }
             secondary_clicks[hand]=gesture==ClickGesture::secondary;
             secondary_down[hand]=pause_consuming_ && (pause_clicks_[hand] || !secondary_available)?
-                !click_available || raw_click:value.secondary;
+                !click_available || raw_click:raw_secondary || value.secondary;
             if (!value.grip_tracked) stop_vibration(hand);
         }
         const bool both_secondary=frame.hands[0].secondary && frame.hands[1].secondary;
@@ -289,6 +305,8 @@ public:
         return frame;
     }
     void suspend() const {
+        primary_blocked_.fill(true);secondary_blocked_.fill(true);click_blocked_.fill(true);
+        menu_blocked_=true;
         for (auto& gesture:click_gestures_)
             if (gesture!=ClickGesture::none) gesture=ClickGesture::blocked;
         if (pause_consuming_) pause_armed_=false;
