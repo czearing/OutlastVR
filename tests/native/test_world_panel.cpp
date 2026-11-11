@@ -9,7 +9,9 @@ using namespace olvr;
 int main(int argc,char** argv) {
     try {
         const bool fault=argc==2 && std::string(argv[1])=="--fault-headlocked";
-        if (argc!=1 && !fault) throw std::invalid_argument("Unknown spatial panel control");
+        const bool mono=argc==2 && std::string(argv[1])=="--fault-mono";
+        const bool canted=argc==2 && std::string(argv[1])=="--canted";
+        if (argc!=1 && !fault && !mono && !canted) throw std::invalid_argument("Unknown spatial panel control");
         constexpr UINT width=128,height=96,source_width=160,source_height=90;
         IsolatedDevice isolated(width*2,height);
         auto& device=*isolated.device.get();
@@ -31,8 +33,23 @@ int main(int argc,char** argv) {
             D3DPOOL_SYSTEMMEM,readback.put(),nullptr),"Create panel readback");
         D3D9WorldPanel renderer(device);
         WorldPanel panel;
-        const std::array<EyeFov,2> fovs{{{-.8f,.8f,.8f,-.8f},{-.8f,.8f,.8f,-.8f}}};
-        const double half_height=(2*std::tan(double(.8f))-.032)/(16./9);
+        const std::array<EyeFov,2> fovs=canted?
+            std::array<EyeFov,2>{{{-.95f,.55f,.72f,-.69f},{-.53f,.91f,.78f,-.65f}}}:
+            std::array<EyeFov,2>{{{-.8f,.8f,.8f,-.8f},{-.8f,.8f,.8f,-.8f}}};
+        double half_height=1e9;
+        for (unsigned eye=0;eye<2;++eye) {
+            const double cant=canted?(eye?.06:-.06):0,c=std::cos(cant),s=std::sin(cant);
+            const auto& f=fovs[eye];
+            const double planes[][3]{
+                {c+s*std::tan(double(f.left)),0,-s+c*std::tan(double(f.left))},
+                {-c-s*std::tan(double(f.right)),0,s-c*std::tan(double(f.right))},
+                {s*std::tan(double(f.down)),1,c*std::tan(double(f.down))},
+                {-s*std::tan(double(f.up)),-1,-c*std::tan(double(f.up))}};
+            for (const auto& n:planes) {
+                const double available=n[0]*(eye?-.032:.032)-2*n[2];
+                half_height=std::min(half_height,available/((16./9)*std::abs(n[0])+std::abs(n[1])));
+            }
+        }
         UINT tested=0,outside=0;
 #ifdef OLVR_ISOLATED_9ON12
         IsolatedD3D12DrawCounter counter(isolated.translation_device());
@@ -46,10 +63,14 @@ int main(int argc,char** argv) {
                 std::cos(pitch/2)*std::cos(yaw/2)*std::cos(roll/2)+std::sin(pitch/2)*std::sin(yaw/2)*std::sin(roll/2)};
             const Vec3 center=frame==3?Vec3{.2f,.1f,.25f}:Vec3{};
             std::array<EyePose,2> eyes{};
-            for (unsigned eye=0;eye<2;++eye)
-                eyes[eye]={add(center,rotate(q,{eye?.032f:-.032f,0,0})),q};
+            for (unsigned eye=0;eye<2;++eye) {
+                const float cant=canted?(eye?.06f:-.06f):0;
+                eyes[eye]={add(center,rotate(q,{eye?.032f:-.032f,0,0})),
+                    multiply(q,{0,std::sin(cant/2),0,std::cos(cant/2)})};
+            }
             if (fault) panel.reset();
-            const auto matrices=panel.locate(eyes,fovs,16.f/9);
+            auto matrices=panel.locate(eyes,fovs,16.f/9);
+            if (mono) matrices[1]=matrices[0];
 #ifdef OLVR_ISOLATED_9ON12
             counter.reset();
 #endif
@@ -59,9 +80,13 @@ int main(int argc,char** argv) {
             bool correct=true;
             for (UINT y=0;y<height;++y) for (UINT x=0;x<width*2;++x) {
                 const auto& eye=eyes[x/width];
-                const double rx=std::tan(double(.8f))*(2.*(x%width)/width-1);
-                const double ry=std::tan(double(.8f))*(1-2.*y/height);
-                const double qx=q.x,qy=q.y,qz=q.z,qw=q.w;
+                const auto& f=fovs[x/width];
+                const double rx=std::tan(double(f.left))+
+                    (std::tan(double(f.right))-std::tan(double(f.left)))*(x%width)/width;
+                const double ry=std::tan(double(f.up))+
+                    (std::tan(double(f.down))-std::tan(double(f.up)))*y/height;
+                const auto rotation=eye.orientation;
+                const double qx=rotation.x,qy=rotation.y,qz=rotation.z,qw=rotation.w;
                 const double dx=(1-2*qy*qy-2*qz*qz)*rx+(2*qx*qy-2*qz*qw)*ry-(2*qx*qz+2*qy*qw);
                 const double dy=(2*qx*qy+2*qz*qw)*rx+(1-2*qx*qx-2*qz*qz)*ry-(2*qy*qz-2*qx*qw);
                 const double dz=(2*qx*qz-2*qy*qw)*rx+(2*qy*qz+2*qx*qw)*ry-(1-2*qx*qx-2*qy*qy);

@@ -15,6 +15,7 @@ struct TrackedUniform {
     unsigned original_register,rows,texture_row;
     TrackedUniformKind kind;
     bool column_major=false;
+    unsigned camera_delta_row=0;
 };
 
 struct TrackedPair {
@@ -90,8 +91,13 @@ inline TrackedPair track_uniforms(Pair pair) {
             if (rows==4 && constant.count==3) rows=3;
             if (constant.count!=rows || constant.number+rows>(vertex?256u:224u))
                 throw std::invalid_argument("Unsupported tracked uniform extent: "+constant.name);
-            result.uniforms.push_back({vertex,constant.number,rows,next_row,kind,constant.matrix_class==3});
-            next_row+=rows;
+            const bool camera_delta=kind==TrackedUniformKind::material_camera &&
+                std::any_of(info.declarations.begin(),info.declarations.end(),[](const Declaration& d) {
+                    return d.type==1 && d.usage==5 && d.semantic==5;
+                });
+            result.uniforms.push_back({vertex,constant.number,rows,next_row,kind,constant.matrix_class==3,
+                camera_delta?next_row+rows:0});
+            next_row+=rows+(camera_delta?1:0);
         }
     }
     if (result.uniforms.empty() && zero_motion_registers.empty()) return result;
@@ -155,7 +161,7 @@ inline TrackedPair track_uniforms(Pair pair) {
             throw std::invalid_argument("No contiguous temporaries for tracked uniform");
         };
         const auto uv=reserve_temp(1);
-        int material_input=-1,material_value=-1;
+        int material_input=-1,material_value=-1,material_delta=-1;
         const TrackedUniform* material_camera=nullptr;
         for (const auto* binding:bindings)
             if (binding->kind==TrackedUniformKind::material_camera) material_camera=binding;
@@ -192,15 +198,19 @@ inline TrackedPair track_uniforms(Pair pair) {
                 op(prefix,vertex?95:66,{destination(0,temporary+row),source(0,uv),source(10,sampler)});
                 op(prefix,2,{destination(0,uv,1),source(0,uv,0),source(2,coordinate,0)});
             }
+            if (binding->camera_delta_row) {
+                material_delta=int(reserve_temp(1));
+                op(prefix,66,{destination(0,material_delta),source(0,uv),source(10,sampler)});
+                op(prefix,2,{destination(0,uv,1),source(0,uv,0),source(2,coordinate,0)});
+            }
         }
         if (material_input>=0) {
-            const auto mapped=mapping[material_camera->original_register];
+            if (material_delta<0)
+                throw std::invalid_argument("Material world-position varying lacks its camera delta");
             unsigned mask=0;
             for (const auto& d:info.declarations) if (int(d.number)==material_input && d.type==1) mask=d.mask&7;
             op(prefix,2,{destination(0,material_value,mask),source(0,material_value),
-                source(2,material_camera->original_register)});
-            op(prefix,2,{destination(0,material_value,mask),source(0,material_value),
-                source(0,mapped)|0x01000000u});
+                source(0,material_delta)});
         }
         const Words wrapped{vertex?0xfffe0300u:0xffff0300u};
         Words body_program=wrapped;

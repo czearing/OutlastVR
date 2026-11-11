@@ -28,7 +28,8 @@ int main(int argc,char** argv) {
         const bool camera_only=camera_only_fault ||
             (argc==2 && std::string(argv[1])=="--material-camera-only");
         const bool material_columns=argc==2 && std::string(argv[1])=="--material-native-columns";
-        const bool material=material_fault || material_columns || camera_only ||
+        const bool material_origin=argc==2 && std::string(argv[1])=="--material-large-origin";
+        const bool material=material_fault || material_columns || material_origin || camera_only ||
             (argc==2 && std::string(argv[1])=="--material-projection");
         const bool motion_fault=argc==2 && std::string(argv[1])=="--fault-motion-policy";
         const bool motion=motion_fault || (argc==2 && std::string(argv[1])=="--motion-policy");
@@ -37,7 +38,7 @@ int main(int argc,char** argv) {
         const bool burst=overwrite || (argc==2 && std::string(argv[1])=="--burst");
         const bool native_fault=argc==2 && std::string(argv[1])=="--fault-native-columns";
         const bool native_translated=argc==2 && std::string(argv[1])=="--native-translated";
-        const bool native_columns=material_columns || shadow || native_fault || native_translated || (argc==2 && std::string(argv[1])=="--native-columns");
+        const bool native_columns=material_columns || material_origin || shadow || native_fault || native_translated || (argc==2 && std::string(argv[1])=="--native-columns");
         const bool context_change=argc==2 && std::string(argv[1])=="--context-change";
         const bool billboard_fault=argc==2 && std::string(argv[1])=="--fault-billboard-camera";
         const bool billboard_lock_fault=argc==2 && std::string(argv[1])=="--fault-billboard-locked";
@@ -79,7 +80,7 @@ int main(int argc,char** argv) {
                 Output output;
                 output.position=float4(position,tex2Dlod(SourceData,float4(.5,.5,0,0)).r,1);
                 output.ray=MUL_NATIVE(ScreenToWorldOffset,float4(position,1,0)).xyz;
-                output.materialWorld=float4(output.ray*25+CameraPositionVS.xyz,1);
+                output.materialWorld=float4(output.ray*MATERIAL_DEPTH+CameraPositionVS.xyz,1);
                 output.billboard=float4(CameraRight.xyz*.25+CameraUp.xyz*.5+CameraWorldPosition.xyz*.01,
                     (CameraRight.w+CameraUp.w+CameraWorldPosition.w)/128+ParticleUpRightResultScalars.x);
                 return output;
@@ -137,6 +138,8 @@ int main(int argc,char** argv) {
         Com<ID3DBlob> vertex_code,pixel_code;
         const std::string prefix=std::string("#define MUL_NATIVE(m,v) mul(m,v)\n#define MATRIX_STORAGE ")+
             (native_columns?"column_major\n":"row_major\n")+
+            (material_origin?"#define ScreenToWorldOffset ScreenToTranslatedWorld\n":"")+
+            (material_origin?"#define MATERIAL_DEPTH .25\n":"#define MATERIAL_DEPTH 25\n")+
             (native_translated?"#define TRANSLATED_NATIVE 1\n":"#define TRANSLATED_NATIVE 0\n")+
             (material?"#define MATERIAL_TEST 1\n":"#define MATERIAL_TEST 0\n")+
             (camera_only?"#define MATERIAL_CAMERA_ONLY 1\n":"#define MATERIAL_CAMERA_ONLY 0\n")+
@@ -169,6 +172,10 @@ int main(int argc,char** argv) {
             gpu_check(device.SetSamplerState(D3DVERTEXTEXTURESAMPLER0,state,D3DTEXF_POINT),"Point sample original VTF");
         gpu_check(device.SetSamplerState(D3DVERTEXTEXTURESAMPLER0,D3DSAMP_MIPFILTER,D3DTEXF_NONE),"Disable original VTF mips");
         TrackingFrame frame{{30,-5,7},{0,1,0},{0,0,1},{-1,0,0},100,{-20,2,-3}};
+        if (material_origin) {
+            frame.origin={16777216,-16777216,16777216};
+            frame.pretranslation={-16777216,16777216,-16777216};
+        }
         const EyeFov mono{-.7f,.8f,.65f,-.6f};
         const auto original=eye_constants(frame,{{0,0,0},{0,0,0,1}},mono,.5f,2000);
         StereoReconstructionContext context{};
@@ -226,7 +233,7 @@ int main(int argc,char** argv) {
             gpu_check(device.SetPixelShaderConstantF(20,shadow_screen.data(),4),"Bind original native screen-to-shadow");
             gpu_check(device.SetPixelShaderConstantF(24,light_screen.data(),4),"Bind original native screen-to-light");
         }
-        if (native_translated) {
+        if (native_translated || material_origin) {
             screen[3]+=frame.pretranslation.x;
             screen[7]+=frame.pretranslation.y;
             screen[11]+=frame.pretranslation.z;
@@ -450,7 +457,7 @@ int main(int argc,char** argv) {
                     std::tan(fov.up)+std::tan(fov.down))*.5f;
                 const auto direction=map_tracking(frame,rotate(pose.orientation,{rx,ry,-1}));
                 const auto origin=add(frame.origin,scale(map_tracking(frame,pose.position),100));
-                const auto world=add(origin,scale(direction,25));
+                const auto world=add(origin,scale(direction,material_origin?.25f:25.f));
                 const auto rotation=map_tracking(frame,rotate(pose.orientation,{nx,ny,-1}));
                 const auto rotated_billboard=[&](const float* native) {
                     const Vec3 value{native[0],native[1],native[2]};
@@ -562,6 +569,7 @@ int main(int argc,char** argv) {
         if (cache_invalidation) std::cout<<"; identical_eye_and_uniform_inputs; context_columns_reset_invalidated; CPU_view_builds=5; CPU_view_cache_hits=1; declaration_builds=2; view_uploads=4";
         if (declaration_cache) std::cout<<"; declaration_builds=4; spare_stream_changed; fresh_stream_frequencies; conflicting_declaration_rejected";
         if (material && !camera_only) std::cout<<"; material_camera_rebase; pixel_forward_projection; large_head_turns";
+        if (material_origin) std::cout<<"; large_world_origin; translated_material_precision";
         if (camera_only) std::cout<<"; material_camera_only; no_world_position_varying; original_camera_preserved; large_head_turns";
         if (motion) std::cout<<"; native_motion_policy_zeroed_without_mutating_caller_constants";
         if (benchmark) {

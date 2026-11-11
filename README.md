@@ -1,15 +1,15 @@
 # Outlast VR
 
-[![Build](https://github.com/czearing/OutlastVR/actions/workflows/build.yml/badge.svg)](https://github.com/czearing/OutlastVR/actions/workflows/build.yml)
+[![Build](https://github.com/czearing/OutlastVR/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/czearing/OutlastVR/actions/workflows/build.yml)
 [![Downloads](https://img.shields.io/github/downloads/czearing/OutlastVR/total)](https://github.com/czearing/OutlastVR/releases)
 
 An unofficial OpenXR VR mod for **Outlast** on Windows. Tracked head and hands,
-controller interaction, and single-pass stereo rendering: one instanced world
-submission for both eyes, not two scene renders.
+controller interaction, and single-pass stereo rendering.
 
 **Preview release.** The default experience uses a thumbstick-toggled full-view
 night-vision filter. The physical camcorder is experimental and disabled by
-default. Automated checks do not certify every scene or headset.
+default. See [known issues](https://github.com/czearing/OutlastVR/blob/master/docs/compatibility.md)
+before installing.
 
 ## Requirements
 
@@ -18,8 +18,7 @@ default. Automated checks do not certify every scene or headset.
 - Set your headset software as the active OpenXR runtime before launching.
 - Use Outlast's default gamepad layout (A).
 
-Unsupported executables are rejected before hooks are installed. See
-[compatibility and known issues](https://github.com/czearing/OutlastVR/blob/main/docs/compatibility.md).
+The launcher checks your game version before starting.
 
 ## Install
 
@@ -36,6 +35,8 @@ Outlast through Steam. To uninstall, remove only the extracted mod files.
 
 ## Controls
 
+Default right-handed bindings:
+
 | Input | Action |
 | --- | --- |
 | Left stick / right stick | Move / turn |
@@ -46,27 +47,37 @@ Outlast through Steam. To uninstall, remove only the extracted mod files.
 | Left primary / secondary | Notes / reload battery |
 | Left menu button | Pause |
 | F8 | Recenter |
+| Hold both stick clicks for one second | Recenter without a keyboard |
 
 Button names follow your controller's OpenXR bindings. Index/Vive/WMR profile
-support varies; see [compatibility](https://github.com/czearing/OutlastVR/blob/main/docs/compatibility.md).
+support varies; see [compatibility](https://github.com/czearing/OutlastVR/blob/master/docs/compatibility.md).
+
+On Vive/WMR profiles without active face buttons, click the stick/pad upward
+for primary or downward for secondary. Horizontal/center clicks retain
+sprint/filter. If the runtime exposes no menu binding, press both secondary
+actions together to pause. These fallbacks do not require a system-menu button.
 
 ## Configuration
 
 Edit `OutlastVR.ini` beside the launcher, then restart the game.
+
+The `[vr]` settings include `snap_turn_degrees` (0 for smooth, 30 for snap),
+`seated`, `left_handed`, `toggle_sprint`, `movement_reference` (`game`, `head`, `main_hand`,
+`off_hand`), `world_scale` (0.5..2) and `vignette_strength` (0..1).
+Left-handed mode swaps the controls. Seated mode uses button crouching.
+With `toggle_sprint=true`, click again or stop moving to stop sprinting.
 
 ```ini
 [experimental]
 physical_camcorder=false
 ```
 
-Leave this off for the simple filter and no held-camera capture/rendering.
-Opting in enables the work-in-progress grip-held camcorder and routes right
-stick click to its native night vision. It is not recommended for normal play.
-The simple filter is a visibility effect, not the game's battery-powered camera.
+Leave this off for normal play. The experimental camcorder uses right-handed
+controls and the game's night vision. The default filter does not use batteries.
 
 ## Development
 
-[Building and testing](https://github.com/czearing/OutlastVR/blob/main/docs/building.md) · [Contributing](https://github.com/czearing/OutlastVR/blob/main/CONTRIBUTING.md) ·
+[Building and testing](https://github.com/czearing/OutlastVR/blob/master/docs/building.md) · [Contributing](https://github.com/czearing/OutlastVR/blob/master/CONTRIBUTING.md) ·
 [Report a bug](https://github.com/czearing/OutlastVR/issues/new/choose)
 
 MIT-licensed original code. See [third-party notices](THIRD_PARTY_NOTICES.md).

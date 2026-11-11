@@ -5,13 +5,23 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <cmath>
+#include <locale>
 
 namespace olvr {
 
+enum class MovementReference {game,head,main_hand,off_hand};
+struct OutlastComfortSettings {
+    float snap_turn_degrees=0,world_scale=1,vignette_strength=0;
+    bool seated=false,left_handed=false,toggle_sprint=false;
+    MovementReference movement_reference=MovementReference::game;
+    unsigned primary_hand() const {return left_handed?0u:1u;}
+};
 struct OutlastConfig {
     std::filesystem::path game_executable;
     std::filesystem::path openxr_loader;
     bool physical_camcorder=false;
+    OutlastComfortSettings comfort;
 };
 
 inline OutlastConfig parse_outlast_config(std::istream& input) {
@@ -43,9 +53,34 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         const auto key=section+"."+trim(line.substr(0,split));
         auto value=trim(line.substr(split+1));
         if (!seen.insert(key).second) throw error("duplicate setting "+key);
-        if (key=="experimental.physical_camcorder") {
-            if (value!="true" && value!="false") throw error("physical_camcorder must be true or false");
-            result.physical_camcorder=value=="true";
+        if (key=="experimental.physical_camcorder" || key=="vr.seated" || key=="vr.left_handed" ||
+            key=="vr.toggle_sprint") {
+            if (value!="true" && value!="false") throw error("expected true or false");
+            if (key=="experimental.physical_camcorder") result.physical_camcorder=value=="true";
+            else if (key=="vr.seated") result.comfort.seated=value=="true";
+            else if (key=="vr.left_handed") result.comfort.left_handed=value=="true";
+            else result.comfort.toggle_sprint=value=="true";
+        } else if (key=="vr.snap_turn_degrees" || key=="vr.world_scale" || key=="vr.vignette_strength") {
+            std::istringstream number(value);number.imbue(std::locale::classic());
+            float parsed=0;
+            if (!(number>>parsed) || !(number>>std::ws).eof() || !std::isfinite(parsed))
+                throw error("expected a finite number");
+            if (key=="vr.snap_turn_degrees") {
+                if (parsed!=0 && (parsed<15 || parsed>90)) throw error("snap_turn_degrees must be 0 or 15..90");
+                result.comfort.snap_turn_degrees=parsed;
+            } else if (key=="vr.world_scale") {
+                if (parsed<.5f || parsed>2) throw error("world_scale must be 0.5..2");
+                result.comfort.world_scale=parsed;
+            } else {
+                if (parsed<0 || parsed>1) throw error("vignette_strength must be 0..1");
+                result.comfort.vignette_strength=parsed;
+            }
+        } else if (key=="vr.movement_reference") {
+            if (value=="game") result.comfort.movement_reference=MovementReference::game;
+            else if (value=="head") result.comfort.movement_reference=MovementReference::head;
+            else if (value=="main_hand") result.comfort.movement_reference=MovementReference::main_hand;
+            else if (value=="off_hand") result.comfort.movement_reference=MovementReference::off_hand;
+            else throw error("movement_reference must be game, head, main_hand or off_hand");
         } else if (key=="game.executable" || key=="vr.openxr_loader") {
             if (!value.empty() && value.front()=='"') {
                 if (value.size()<2 || value.back()!='"') throw error("unterminated quoted path");
@@ -57,6 +92,8 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         } else throw error("unknown setting "+key);
     }
     if (input.bad()) throw std::runtime_error("Cannot finish reading OutlastVR.ini");
+    if (result.physical_camcorder && result.comfort.left_handed)
+        throw std::invalid_argument("Experimental physical camcorder requires right-handed controls");
     return result;
 }
 

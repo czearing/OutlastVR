@@ -1,6 +1,7 @@
 #pragma once
 #include "d3d9_resource.h"
 #include "xr_view_constants.h"
+#include "outlast_config.h"
 #include <cstdint>
 #include <xinput.h>
 #define XR_USE_PLATFORM_WIN32
@@ -32,6 +33,7 @@ using InputTickEntry=void(WINAPI*)(void*,float);
 using GamepadStateEntry=DWORD(WINAPI*)(DWORD,XINPUT_STATE*);
 using GamepadVibrationEntry=DWORD(WINAPI*)(DWORD,XINPUT_VIBRATION*);
 using ViewportFocusEntry=INT(WINAPI*)(void*);
+using TranslucencyBoundsEntry=INT(WINAPI*)(void*,UINT,RECT*);
 
 struct RuntimeBindings {
     MainViewportEntry main_viewport=nullptr;
@@ -58,14 +60,16 @@ struct RuntimeBindings {
     INT* gamepad_count=nullptr;
     GamepadVibrationEntry gamepad_vibration=nullptr;
     ViewportFocusEntry viewport_focus=nullptr;
+    TranslucencyBoundsEntry translucency_bounds=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=8;
+    UINT version=10;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};
+    OutlastComfortSettings comfort;
 };
 
 struct RuntimeStatistics {

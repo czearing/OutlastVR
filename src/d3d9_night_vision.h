@@ -2,6 +2,7 @@
 #include "d3d9_state_restore.h"
 #include <d3dcompiler.h>
 #include <cstring>
+#include <cmath>
 
 namespace olvr {
 
@@ -17,11 +18,15 @@ public:
     explicit D3D9NightVision(IDirect3DDevice9& device):device_(device) {
         const char* text=R"(
             sampler Source:register(s0);
+            float4 Options:register(c0);
             float4 main(float2 uv:TEXCOORD0):COLOR {
                 float4 image=tex2D(Source,uv);
                 float luminance=dot(image.rgb,float3(.2126,.7152,.0722));
                 float green=pow(saturate(luminance*1.6),.65);
-                return float4(float3(.12,1,.22)*green,image.a);
+                if (Options.x>.5) image.rgb=float3(.12,1,.22)*green;
+                float2 eye=float2(frac(uv.x*2),uv.y)*2-1;
+                image.rgb*=1-Options.y*smoothstep(.55,1,length(eye));
+                return image;
             })";
         Com<ID3DBlob> code,errors;
         const auto status=D3DCompile(text,std::strlen(text),"night-vision-filter",nullptr,nullptr,
@@ -32,7 +37,9 @@ public:
         gpu_check(device_.CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()),shader_.put()),
             "Create night-vision filter");
     }
-    void draw(IDirect3DSurface9& output) {
+    void draw(IDirect3DSurface9& output,bool night_vision=true,float vignette=0) {
+        if (!std::isfinite(vignette) || vignette<0 || vignette>1)
+            throw std::invalid_argument("Vignette strength must be 0..1");
         D3DSURFACE_DESC description{};
         gpu_check(output.GetDesc(&description),"Read night-vision target");
         if (!description.Width || description.Width%2 || !description.Height ||
@@ -80,6 +87,8 @@ public:
                 gpu_check(device_.SetRenderState(setting.first,setting.second),"Set isolated filter state");
             gpu_check(device_.SetVertexShader(nullptr),"Use transformed filter quad");
             gpu_check(device_.SetPixelShader(shader_.get()),"Bind night-vision filter");
+            const float options[]{night_vision?1.f:0.f,vignette,0,0};
+            gpu_check(device_.SetPixelShaderConstantF(0,options,1),"Set stereo comfort filter options");
             gpu_check(device_.SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1),"Set filter vertex format");
             gpu_check(device_.SetTexture(0,source_.get()),"Bind completed stereo input");
             for (const auto& setting:std::initializer_list<std::pair<D3DSAMPLERSTATETYPE,DWORD>>{

@@ -124,6 +124,7 @@ void verify_display_encoding(ID3D12Device& device,ID3D12CommandQueue& queue,ID3D
 
 int main(int argc, char** argv) {
     try {
+        const bool adapter_selection=argc==2 && std::string(argv[1])=="--adapter-selection";
         const bool swapped = argc == 2 && std::string(argv[1]) == "--fault-swapped";
         const bool typeless = argc == 2 && std::string(argv[1]) == "--typeless";
         const bool linear_color = argc == 2 && std::string(argv[1]) == "--fault-linear-color";
@@ -132,9 +133,94 @@ int main(int argc, char** argv) {
         const bool serial_wait = argc == 2 && std::string(argv[1]) == "--fault-flight-wait";
         const bool queued_drain = argc == 2 && std::string(argv[1]) == "--queued-drain";
         const bool queued = serial_wait || queued_drain || (argc == 2 && std::string(argv[1]) == "--queued-contexts");
-        if (argc > 2 || (argc == 2 && !swapped && !typeless && !queued && !color_test))
+        if (argc > 2 || (argc == 2 && !swapped && !typeless && !queued && !color_test && !adapter_selection))
             throw std::invalid_argument("Usage: test_stereo_transfer.exe [--fault-swapped|--typeless|--queued-contexts|--queued-drain|--fault-flight-wait]");
         D3D9On12Factory owner;
+        if (adapter_selection) {
+            Com<IDXGIFactory4> inventory;
+            gpu_check(CreateDXGIFactory1(__uuidof(IDXGIFactory4),
+                reinterpret_cast<void**>(inventory.put())),"Enumerate runtime-selectable adapters");
+            SystemD3D9Module system;
+            using CreateEx=HRESULT(WINAPI*)(UINT,IDirect3D9Ex**);
+            CreateEx create_ex=nullptr;
+            const auto entry=system.find("Direct3DCreate9Ex");
+            static_assert(sizeof(entry)==sizeof(create_ex));
+            std::memcpy(&create_ex,&entry,sizeof(entry));
+            if (!create_ex) throw std::runtime_error("No native legacy adapter inventory");
+            Com<IDirect3D9Ex> legacy_inventory;
+            gpu_check(create_ex(D3D_SDK_VERSION,legacy_inventory.put()),"Enumerate native legacy adapters");
+            unsigned selected=0,cross_gpu=0,unmapped=0;
+            for (UINT index=0;;++index) {
+                Com<IDXGIAdapter1> adapter;
+                const auto status=inventory->EnumAdapters1(index,adapter.put());
+                if (status==DXGI_ERROR_NOT_FOUND) break;
+                gpu_check(status,"Read runtime-selectable adapter");
+                DXGI_ADAPTER_DESC1 description{};
+                gpu_check(adapter->GetDesc1(&description),"Read runtime-selectable adapter identity");
+                if (description.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+                const auto support=D3D12CreateDevice(adapter.get(),D3D_FEATURE_LEVEL_11_0,
+                    __uuidof(ID3D12Device),nullptr);
+                if (support==DXGI_ERROR_UNSUPPORTED) continue;
+                gpu_check(support,"Check runtime adapter D3D12 support");
+                bool mapped=false;
+                for (UINT legacy_index=0;legacy_index<legacy_inventory->GetAdapterCount();++legacy_index) {
+                    LUID legacy_luid{};
+                    gpu_check(legacy_inventory->GetAdapterLUID(legacy_index,&legacy_luid),"Read independent legacy adapter identity");
+                    mapped|=legacy_luid.LowPart==description.AdapterLuid.LowPart &&
+                        legacy_luid.HighPart==description.AdapterLuid.HighPart;
+                }
+                if (!mapped) {
+                    bool rejected=false;
+                    try {D3D9On12Factory incompatible(&description.AdapterLuid);}
+                    catch (const std::runtime_error& error) {
+                        if (std::string(error.what())!="No classic D3D9 adapter matches the OpenXR D3D12 device") throw;
+                        rejected=true;
+                    }
+                    if (!rejected) throw std::runtime_error("Unmapped runtime adapter silently selected another GPU");
+                    ++unmapped;
+                    continue;
+                }
+                D3D9On12Factory chosen(&description.AdapterLuid);
+                const auto actual=chosen.device()->GetAdapterLuid();
+                if (actual.LowPart!=description.AdapterLuid.LowPart ||
+                    actual.HighPart!=description.AdapterLuid.HighPart)
+                    throw std::runtime_error("Explicit runtime adapter selection fell back to another GPU");
+                HiddenWindow selected_window(256,256);
+                D3DPRESENT_PARAMETERS parameters{};
+                parameters.Windowed=TRUE;parameters.SwapEffect=D3DSWAPEFFECT_DISCARD;
+                parameters.BackBufferWidth=parameters.BackBufferHeight=256;
+                parameters.BackBufferFormat=D3DFMT_A8R8G8B8;parameters.hDeviceWindow=selected_window.get();
+                Com<IDirect3DDevice9> renderer;
+                gpu_check(chosen.get()->CreateDevice(chosen.adapter_ordinal(),D3DDEVTYPE_HAL,selected_window.get(),
+                    D3DCREATE_HARDWARE_VERTEXPROCESSING,&parameters,renderer.put()),
+                    "Create renderer on the explicitly selected runtime GPU");
+                verify_on12_device(*renderer.get(),*chosen.device());
+                const auto baseline=owner.device()->GetAdapterLuid();
+                if (actual.LowPart!=baseline.LowPart || actual.HighPart!=baseline.HighPart) {
+                    bool rejected=false;
+                    try {verify_on12_device(*renderer.get(),*owner.device());}
+                    catch (const std::runtime_error& error) {
+                        if (std::string(error.what())!="Legacy renderer and submission device adapter identities differ") throw;
+                        rejected=true;
+                    }
+                    if (!rejected) throw std::runtime_error("Cross-GPU renderer/submission mismatch was accepted");
+                    rejected=false;
+                    try {D3D9On12StereoTransfer mismatch(*renderer.get(),*chosen.device(),*owner.queue());}
+                    catch (const std::invalid_argument& error) {
+                        if (std::string(error.what())!="Transfer queue belongs to a different D3D12 device") throw;
+                        rejected=true;
+                    }
+                    if (!rejected) throw std::runtime_error("Cross-GPU transfer queue was accepted");
+                    ++cross_gpu;
+                }
+                ++selected;
+            }
+            if (!selected) throw std::runtime_error("No hardware adapter was exercised");
+            std::cout<<"PASS: explicit_runtime_adapter_selection; hardware_adapters="<<selected
+                <<"; cross_gpu_mismatch_checks="<<cross_gpu<<"; unmapped_adapters_rejected="<<unmapped
+                <<"; legacy_bridge_identity_verified\n";
+            return 0;
+        }
         HiddenWindow window(512, 256);
         D3DPRESENT_PARAMETERS presentation{};
         presentation.Windowed = TRUE;
@@ -173,6 +259,18 @@ int main(int argc, char** argv) {
                                                  reinterpret_cast<void**>(eye_array.put())),
                   "Create persistent two-layer eye image");
         D3D9On12StereoTransfer transport(*legacy.get(), device, queue);
+        D3D12_COMMAND_QUEUE_DESC copy_description{};
+        copy_description.Type=D3D12_COMMAND_LIST_TYPE_COPY;
+        Com<ID3D12CommandQueue> copy_queue;
+        gpu_check(device.CreateCommandQueue(&copy_description,__uuidof(ID3D12CommandQueue),
+            reinterpret_cast<void**>(copy_queue.put())),"Create incompatible copy-only queue");
+        bool copy_rejected=false;
+        try {D3D9On12StereoTransfer invalid(*legacy.get(),device,*copy_queue.get());}
+        catch (const std::invalid_argument& error) {
+            if (std::string(error.what())!="Stereo transfer requires the direct OpenXR binding queue") throw;
+            copy_rejected=true;
+        }
+        if (!copy_rejected) throw std::runtime_error("Stereo transfer accepted a copy-only compositor queue");
         std::array<D3D12EyeTarget, 2> targets{{{eye_array.get(), 0}, {eye_array.get(), 1}}};
         UINT refusals = 0;
         for (UINT fault = 0; fault < 4; ++fault) {

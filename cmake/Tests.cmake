@@ -13,10 +13,17 @@ foreach(name IN ITEMS
     test_native_camcorder_lifecycle test_native_camera_resources
     test_outlast_desktop_cursor test_outlast_focus_pause test_outlast_render_size
     test_outlast_motion_controls test_outlast_native_use test_outlast_hand_collision
+    test_outlast_body_lifecycle
+    test_outlast_comfort
     test_native_probe_progress test_native_probe_input test_outlast_locomotion_camera
     test_native_glass_eye_ownership test_native_ppm test_native_detours test_openxr_motion_input
     test_headlocked_ui test_world_scissor test_outlast_native_view)
     olvr_test(${name})
+endforeach()
+foreach(mode IN ITEMS pause-chord fallback-gestures)
+    string(REPLACE "-" "_" test_mode "${mode}")
+    add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})
+    set_tests_properties(test_input_${test_mode} PROPERTIES LABELS "cpu" TIMEOUT 120)
 endforeach()
 add_executable(test_native_pixel_delta tests/native/test_native_pixel_delta.cpp)
 target_link_libraries(test_native_pixel_delta PRIVATE olvr_options)
@@ -47,13 +54,46 @@ if(OLVR_GPU_TESTS)
         target_compile_definitions(${name} PRIVATE OLVR_ISOLATED_9ON12)
         set_tests_properties(${name} PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
     endforeach()
+    add_test(NAME test_world_panel_canted COMMAND test_world_panel --canted)
+    set_tests_properties(test_world_panel_canted PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
+    add_test(NAME test_runtime_gpu_adapter COMMAND test_stereo_transfer --adapter-selection)
+    set_tests_properties(test_runtime_gpu_adapter PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
+    add_test(NAME test_material_camera_precision COMMAND test_tracked_uniforms --material-large-origin)
+    set_tests_properties(test_material_camera_precision PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     olvr_test(test_openxr_session)
     target_compile_definitions(test_openxr_session PRIVATE OLVR_ISOLATED_9ON12)
     set_tests_properties(test_openxr_session PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
+    foreach(mode IN ITEMS tracking-resume asymmetric-extents invalid-pose session-restart)
+        string(REPLACE "-" "_" test_mode "${mode}")
+        add_test(NAME test_openxr_${test_mode} COMMAND test_openxr_session --${mode})
+        set_tests_properties(test_openxr_${test_mode} PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
+    endforeach()
+    foreach(failure IN ITEMS extension adapter view-count limits format swapchain images)
+        string(REPLACE "-" "_" test_failure "${failure}")
+        add_test(NAME test_openxr_reject_${test_failure} COMMAND test_openxr_session --reject-${failure})
+        set_tests_properties(test_openxr_reject_${test_failure} PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
+    endforeach()
     if(OLVR_RETAIL_EXECUTABLE)
         olvr_test(test_integrated_mod "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}")
         target_compile_definitions(test_integrated_mod PRIVATE OLVR_ISOLATED_9ON12)
         set_tests_properties(test_integrated_mod PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE)
+        add_test(NAME test_integrated_comfort COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --comfort)
+        set_tests_properties(test_integrated_comfort PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME test_integrated_snap COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --snap)
+        set_tests_properties(test_integrated_snap PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME test_integrated_ipd_cycle COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --ipd-cycle)
+        set_tests_properties(test_integrated_ipd_cycle PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME test_integrated_input_chords COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --input-chords)
+        set_tests_properties(test_integrated_input_chords PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        foreach(mode IN ITEMS transitions upload)
+            add_test(NAME test_integrated_flat_${mode} COMMAND test_integrated_mod
+                "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --flat-${mode})
+            set_tests_properties(test_integrated_flat_${mode} PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        endforeach()
     endif()
 endif()
 

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <cmath>
+#include <array>
 
 namespace olvr {
 inline POINT outlast_menu_source_point(float u,float v,UINT width,UINT height) {
@@ -18,15 +19,37 @@ inline POINT outlast_menu_source_point(float u,float v,UINT width,UINT height) {
 }
 class ControllerMenuPress {
     unsigned hand_=2;
-    bool armed_=false,down_=false;
+    std::array<bool,2> armed_{};
+    bool down_=false;
 public:
+    unsigned select_hand(bool enabled,unsigned current,const std::array<bool,2>& tracked,
+                         const std::array<float,2>& triggers) {
+        if (current>1) throw std::invalid_argument("Invalid current menu pointer hand");
+        for (const auto trigger:triggers)
+            if (!std::isfinite(trigger) || trigger<0 || trigger>1)
+                throw std::invalid_argument("Invalid tracked menu trigger");
+        if (!enabled) {hand_=2;armed_={};down_=false;return current;}
+        for (unsigned hand=0;hand<2;++hand) {
+            if (!tracked[hand]) armed_[hand]=false;
+            else if (triggers[hand]<=.4f) armed_[hand]=true;
+        }
+        unsigned selected=current;
+        if (!down_) {
+            if (!tracked[current] && tracked[1-current]) selected=1-current;
+            if (tracked[1-current] && armed_[1-current] && triggers[1-current]>=.6f) selected=1-current;
+            if (tracked[current] && armed_[current] && triggers[current]>=.6f) selected=current;
+        }
+        for (unsigned hand=0;hand<2;++hand)
+            if (hand!=selected && triggers[hand]>=.6f) armed_[hand]=false;
+        return selected;
+    }
     bool update(bool enabled,bool hit,unsigned hand,float trigger) {
         if (hand>1 || !std::isfinite(trigger) || trigger<0 || trigger>1)
             throw std::invalid_argument("Invalid tracked menu trigger");
-        if (!enabled) {hand_=2;armed_=false;down_=false;return false;}
-        if (hand_!=hand) {hand_=hand;armed_=false;down_=false;}
-        if (trigger<=.4f) {armed_=true;down_=false;}
-        else if (trigger>=.6f && armed_) {armed_=false;down_=hit;}
+        if (!enabled) {hand_=2;armed_={};down_=false;return false;}
+        if (hand_!=hand) {hand_=hand;down_=false;}
+        if (trigger<=.4f) {armed_[hand]=true;down_=false;}
+        else if (trigger>=.6f && armed_[hand]) {armed_[hand]=false;down_=hit;}
         else if (!hit) down_=false;
         return down_;
     }

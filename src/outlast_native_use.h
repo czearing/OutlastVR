@@ -15,10 +15,11 @@ inline bool outlast_native_use_action_ready(bool body_ready,const OutlastNativeU
 }
 
 inline std::optional<OutlastUseRay> outlast_controller_use_ray(
-    const TrackingFrame& tracking,const MotionFrame& motion,UINT64 sampled,UINT64 now,bool allowed) {
-    if (!allowed || !motion.focused || !motion.hands[1].aim_tracked ||
+    const TrackingFrame& tracking,const MotionFrame& motion,UINT64 sampled,UINT64 now,bool allowed,unsigned hand=1) {
+    if (hand>=2) throw std::invalid_argument("Invalid native interaction hand");
+    if (!allowed || !motion.focused || !motion.hands[hand].aim_tracked ||
         now<sampled || now-sampled>250000) return {};
-    const auto& aim=motion.hands[1].aim;
+    const auto& aim=motion.hands[hand].aim;
     const Vec3 position{aim.position.x,aim.position.y,aim.position.z};
     const Quaternion q{aim.orientation.x,aim.orientation.y,aim.orientation.z,aim.orientation.w};
     const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;

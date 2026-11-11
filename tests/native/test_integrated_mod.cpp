@@ -28,8 +28,10 @@ std::vector<float> vertex_values;
 unsigned scene_number=0;
 bool fault_dual=false;
 bool fault_mono=false;
+bool fault_flat_mono=false;
 unsigned cull_checks=0,nonfinite_spheres=0;
 unsigned crosshair_updates=0;
+unsigned translucency_checks=0;
 float crosshair_elapsed=0;
 bool thread_handoff=false,thread_overlap=false,fault_reset_thread=false,fault_reset_reentrant=false;
 bool ui_owned=false;
@@ -53,7 +55,9 @@ HANDLE render_entered=nullptr,present_requested=nullptr,present_finished=nullptr
 XrResult XRAPI_CALL mono_locate(XrSession session,const XrViewLocateInfo* info,XrViewState* state,
     uint32_t capacity,uint32_t* count,XrView* output) {
     const auto result=locate(session,info,state,capacity,count,output);
-    if (result==XR_SUCCESS) {output[1].pose=output[0].pose;output[1].fov=output[0].fov;}
+    if (result==XR_SUCCESS && (!fault_flat_mono || mock.flat_frame)) {
+        output[1].pose=output[0].pose;output[1].fov=output[0].fov;
+    }
     return result;
 }
 XrResult XRAPI_CALL mono_resolve(XrInstance instance,const char* name,PFN_xrVoidFunction* output) {
@@ -244,7 +248,41 @@ NATIVE void WINAPI view_stub(void*,const void* view) {
         reinterpret_cast<const float*>(static_cast<const unsigned char*>(view)+0x200),4),
         "Upload original native surrogate view");
 }
+NATIVE INT WINAPI translucency_bounds_stub(void*,UINT,RECT* bounds) {
+    asm volatile("nop;nop;nop;nop;nop");
+    *bounds=scene_number%2?RECT{}:RECT{96,96,128,128};
+    return scene_number%2?0:1;
+}
 void render_contents() {
+    const bool owned=!mock.ui || ui_owned;
+    const RECT native_bounds=scene_number%2?RECT{}:RECT{96,96,128,128};
+    RECT bounds{};
+    const auto visible=translucency_bounds_stub(renderer_data.data(),scene_number%4,&bounds);
+    require(visible==(owned?1:scene_number%2?0:1) &&
+        bounds.left==(owned?0:native_bounds.left) && bounds.top==(owned?0:native_bounds.top) &&
+        bounds.right==(owned?256:native_bounds.right) && bounds.bottom==(owned?256:native_bounds.bottom),
+        "Tracked translucency retained empty/partial mono bounds or changed an unowned renderer");
+    ++translucency_checks;
+    if (owned) {
+        const auto before=view_data;
+        const std::array<INT,4> subviewport{16,24,192,160};
+        write(view_data.data(),0x6c,subviewport);
+        require(translucency_bounds_stub(renderer_data.data(),0,&bounds)==1 &&
+            bounds.left==16 && bounds.top==24 && bounds.right==208 && bounds.bottom==184,
+            "Tracked translucency bounds lost a native subviewport origin or extent");
+        write(view_data.data(),0x6c,std::array<INT,4>{0,0,0,256});
+        require(translucency_bounds_stub(renderer_data.data(),0,&bounds)==(scene_number%2?0:1) &&
+            std::memcmp(&bounds,&native_bounds,sizeof(bounds))==0,
+            "Tracked translucency bounds turned an empty native viewport into a visible pass");
+        write(view_data.data(),0x6c,std::array<INT,4>{0,0,256,256});
+        require(view_data==before,"Translucency bounds changed native camera/view fields");
+        translucency_checks+=2;
+    }
+    int foreign_renderer=0;
+    require(translucency_bounds_stub(&foreign_renderer,0,&bounds)==(scene_number%2?0:1) &&
+        std::memcmp(&bounds,&native_bounds,sizeof(bounds))==0,
+        "Tracked translucency bounds escaped native renderer ownership");
+    ++translucency_checks;
     std::array<unsigned char,0x84c> hud{};
     hud.fill(0x5a);
     auto expected_hud=hud;
@@ -471,12 +509,21 @@ int main(int argc,char** argv) {
             mode=="--ui-scaleform" || mode=="--ui-scaleform-handoff" ||
             mode=="--camera-tilt" || mode=="--fault-camera-tilt" ||
             mode=="--camera-bob" || mode=="--fault-camera-bob" ||
-            mode=="--fault-containment" || mode=="--fault-crosshair" ||
+            mode=="--fault-containment" || mode=="--fault-crosshair" || mode=="--fault-translucency-bounds" ||
             mode=="--fault-reset-thread" || mode=="--fault-reset-reentrant" || mode=="--fault-joystick-focus" ||
-            mode=="--floor-startup")),
+            mode=="--floor-startup" || mode=="--comfort" || mode=="--comfort-fault-scale" ||
+            mode=="--comfort-fault-seated" || mode=="--comfort-fault-handedness" ||
+            mode=="--comfort-fault-turn" || mode=="--snap" || mode=="--fault-snap" ||
+            mode=="--flat-transitions" || mode=="--flat-upload" || mode=="--fault-flat-mono" ||
+            mode=="--ipd-cycle" || mode=="--input-chords")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
-        fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono";
+        fault_flat_mono=mode=="--fault-flat-mono";
+        fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono" || fault_flat_mono;
+        const bool flat_upload=mode=="--flat-upload";
+        const bool input_chords=mode=="--input-chords";
+        mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono;
+        mock.dynamic_ipd=mode=="--ipd-cycle";
         thread_handoff=mode=="--thread-handoff" || mode=="--ui-scaleform-handoff";
         thread_overlap=mode=="--thread-overlap";
         fault_reset_thread=mode=="--fault-reset-thread";fault_reset_reentrant=mode=="--fault-reset-reentrant";
@@ -497,9 +544,23 @@ int main(int argc,char** argv) {
         const auto error=exported<LastError>(dll,"OutlastVR_LastError");
         shutdown=exported<Shutdown>(dll,"OutlastVR_Shutdown");
         RuntimeTestConfiguration config{};
+        const bool snap_mode=mode=="--snap" || mode=="--fault-snap";
+        if (snap_mode) {
+            config.comfort.snap_turn_degrees=mode=="--fault-snap"?0.f:15.f;
+            mock.snap_test=true;
+        }
+        const bool comfort_mode=mode.rfind("--comfort",0)==0;
+        if (comfort_mode) {
+            config.comfort.seated=mode!="--comfort-fault-seated";
+            config.comfort.left_handed=mode!="--comfort-fault-handedness";
+            config.comfort.snap_turn_degrees=mode=="--comfort-fault-turn"?0.f:30.f;
+            config.comfort.world_scale=mode=="--comfort-fault-scale"?1.f:2.f;
+            mock.comfort_seated=true;
+            mock.comfort_world_scale=2.f;
+        }
         const bool camera_tilt=mode=="--camera-tilt" || mode=="--fault-camera-tilt";
         const bool camera_bob=mode=="--camera-bob" || mode=="--fault-camera-bob";
-        mock.upright_camera=camera_tilt || camera_bob;
+        mock.upright_camera=camera_tilt || camera_bob || comfort_mode;
         const float pitch=camera_tilt?.35f:0.f,roll=camera_tilt?.18f:0.f;
         const TrackingFrame frame{{0,0,0},
             {std::cos(roll),std::sin(roll)*std::cos(pitch),std::sin(roll)*std::sin(pitch)},
@@ -520,8 +581,9 @@ int main(int argc,char** argv) {
         config.bindings.gamepads=&gamepad_data;
         config.bindings.gamepad_count=&gamepad_count;
         config.bindings.viewport_focus=mode=="--fault-joystick-focus"?nullptr:&viewport_focus_stub;
+        config.bindings.translucency_bounds=mode=="--fault-translucency-bounds"?nullptr:&translucency_bounds_stub;
         write(native_gamepads.data(),8,INT(3));
-        mock.motion_focus_test=true;
+        mock.motion_focus_test=!input_chords;
         write(camera_object.data(),0x60,camera_hero.data());
         write(camera_object.data(),0x118,UINT(2));
         write(camera_hero.data(),0x360,165.f);
@@ -581,6 +643,7 @@ int main(int argc,char** argv) {
         gpu_check(integrated_device->SetTexture(13,stale_atlas.get()),"Retain an atlas on an undeclared native sampler");
         IsolatedD3D12DrawCounter counter(*mock.device,true,mock.queue);mock.counter=&counter;
         write(renderer_data.data(),0x68,view_data.data());write(renderer_data.data(),0x70,UINT(1));
+        write(view_data.data(),0x6c,std::array<INT,4>{0,0,256,256});
         write(rhi_data.data(),0x34,integrated_device.get());write(rhi_data.data(),0x10,native_stats.data());
         write(rhi_data.data(),0x18,UINT(1));
         const auto matrix=eye_constants(frame,{{0,0,0},{0,0,0,1}},{-.8f,.85f,.75f,-.7f},1,10000);
@@ -589,8 +652,37 @@ int main(int argc,char** argv) {
             native_matrix[row*4+column]=matrix[column*4+row];
         std::memcpy(view_data.data()+0x200,native_matrix.data(),64);
         int viewport=0,family=0;
-        bool previous_motion_active=false;
+        motion_mock::fake.neutral_controls=true;
+        motion_mock::fake.fixture_aim_tracked=!mock.flat_test;
+        motion_mock::fake.fixture_use=.75f;
+        motion_mock::fake.fixture_grab={.25f,.75f};
+        motion_mock::fake.fixture_jump=motion_mock::fake.fixture_nv=!comfort_mode && !input_chords;
+        motion_mock::fake.fixture_notes=motion_mock::fake.fixture_sprint=comfort_mode;
+        motion_mock::fake.fixture_move=comfort_mode?XrVector2f{-.4f,.6f}:XrVector2f{.3f,.6f};
+        motion_mock::fake.fixture_turn=comfort_mode?XrVector2f{.3f,.6f}:
+            XrVector2f{-.4f,input_chords?0.f:.6f};
+        unsigned crouch_edges=0;
+        Com<IDirect3DTexture9> flat_texture,offscreen_atlas;
+        Com<IDirect3DSurface9> upload_source,flat_readback;
         for (unsigned f=0;f<20;++f) {
+            mock.flat_frame=mock.flat_test && (f%5==1 || f%5==2);
+            const bool flat_only=mock.flat_test && f%5==1;
+            mock.flat_after_world=mock.flat_frame && !flat_only;
+            if (snap_mode) motion_mock::fake.fixture_turn.x=f==1?1.f:0.f;
+            motion_mock::fake.fixture_crouch=!comfort_mode && f!=6 && f!=12;
+            motion_mock::fake.fixture_reload=comfort_mode && f!=6 && f!=12;
+            if (input_chords) {
+                const unsigned step=f+1;
+                motion_mock::fake.fixture_sprint=step==2 || step==6 || step==7 ||
+                    (step>=16 && step<=18);
+                motion_mock::fake.fixture_nv=step==2 || step==3 || step==6 || step==9;
+                motion_mock::fake.fixture_crouch=step==11 || step==12;
+                motion_mock::fake.fixture_reload=step==11 || step==14;
+                motion_mock::fake.menu_button=step<11 || step>=16;
+                motion_mock::fake.face_buttons=step<16;
+                motion_mock::fake.fixture_move=step==16?XrVector2f{0,1}:
+                    step==17?XrVector2f{}:step==18 || step==19?XrVector2f{0,-1}:XrVector2f{.3f,.6f};
+            }
             if (camera_bob) {
                 auto animated=frame;
                 animated.origin=f?Vec3{10*std::sin(float(f)),12*std::sin(float(f)*.7f),
@@ -608,6 +700,9 @@ int main(int argc,char** argv) {
             lean_tick_stub(lean_node.data(),.015f);
             camera_update_stub(camera_object.data(),.015f);
             if (f==10) {
+                flat_texture.reset();
+                offscreen_atlas.reset();
+                upload_source.reset();flat_readback.reset();
                 gpu_check(integrated_device->SetTexture(13,nullptr),"Unbind the owned default-pool fixture before reset");
                 stale_atlas.reset();
                 if (fault_reset_thread) {
@@ -620,15 +715,104 @@ int main(int argc,char** argv) {
                 gpu_check(integrated_device->SetRenderState(D3DRS_ZENABLE,FALSE),"Restore fixture depth after reset");
                 gpu_check(integrated_device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE),"Restore fixture culling after reset");
             }
-            if (!mock.ui || ui_owned) main_stub(&viewport,nullptr,&family);
+            if ((!mock.ui || ui_owned) && !flat_only) main_stub(&viewport,nullptr,&family);
             auto render_frame=[&]{
-                if (ui_scaleform) {
+                if (flat_only) {
+                    counter.reset();mock.expected_instances=2;
+                } else if (ui_scaleform) {
                     require(ui_stub(renderer_data.data())==0x28,"Native Scaleform command return value changed");
                 } else if (mock.ui && !ui_owned) {
                     const float identity[]{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
                     require(batched_stub(renderer_data.data(),identity,256,256,0x1357,0x3f800000)==0x12345678abcdef00ull,
                         "Native Canvas hook changed the original return value");
                 } else dispatch_stub(renderer_data.data());
+                if (mock.flat_frame) {
+                    if (!flat_upload && !flat_texture.get()) {
+                        gpu_check(integrated_device->CreateTexture(256,256,1,D3DUSAGE_RENDERTARGET,
+                            D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,flat_texture.put(),nullptr),"Create native flat-video source");
+                        Com<IDirect3DSurface9> image;
+                        gpu_check(flat_texture->GetSurfaceLevel(0,image.put()),"Get native video surface");
+                        gpu_check(integrated_device->ColorFill(image.get(),nullptr,0xff000000),"Clear native video frame");
+                        const RECT red{40,145,104,209},green{150,50,214,114};
+                        gpu_check(integrated_device->ColorFill(image.get(),&red,0xffff0000),"Fill native red video marker");
+                        gpu_check(integrated_device->ColorFill(image.get(),&green,0xff00ff00),"Fill native green video marker");
+                    }
+                    Com<IDirect3DSurface9> image,backbuffer;
+                    gpu_check(integrated_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,backbuffer.put()),
+                        "Get native movie backbuffer");
+                    const auto video_pixel=[](UINT x,UINT y) {
+                        return x>=40 && x<104 && y>=145 && y<209?DWORD(0xffff0000):
+                            x>=150 && x<214 && y>=50 && y<114?DWORD(0xff00ff00):DWORD(0xff000000);
+                    };
+                    if (flat_upload) {
+                        if (!upload_source.get()) {
+                            gpu_check(integrated_device->CreateOffscreenPlainSurface(256,256,D3DFMT_A8R8G8B8,
+                                D3DPOOL_SYSTEMMEM,upload_source.put(),nullptr),"Create native CPU video surface");
+                            D3DLOCKED_RECT upload{};
+                            gpu_check(upload_source->LockRect(&upload,nullptr,0),"Lock native CPU movie");
+                            for (UINT y=0;y<256;++y) for (UINT x=0;x<256;++x)
+                                reinterpret_cast<DWORD*>(static_cast<char*>(upload.pBits)+y*upload.Pitch)[x]=video_pixel(x,y);
+                            gpu_check(upload_source->UnlockRect(),"Unlock native CPU movie");
+                        }
+                        gpu_check(integrated_device->UpdateSurface(upload_source.get(),nullptr,backbuffer.get(),nullptr),
+                            "Upload native full-screen movie without a renderer");
+                        const RECT patch{40,145,104,209};const POINT offset{40,145};
+                        gpu_check(integrated_device->ColorFill(backbuffer.get(),&patch,0xffeeeeee),
+                            "Replace both movie subrectangles before the native partial upload");
+                        gpu_check(integrated_device->UpdateSurface(upload_source.get(),&patch,backbuffer.get(),&offset),
+                            "Upload a native movie subrectangle into both atlas halves");
+                    } else {
+                        gpu_check(flat_texture->GetSurfaceLevel(0,image.put()),"Get current native video frame");
+                        gpu_check(integrated_device->StretchRect(image.get(),nullptr,backbuffer.get(),nullptr,D3DTEXF_NONE),
+                            "Present a flat-only frame or overwrite the earlier world with a flat video");
+                    }
+                    if (!flat_readback.get())
+                        gpu_check(integrated_device->CreateOffscreenPlainSurface(512,256,D3DFMT_A8R8G8B8,
+                            D3DPOOL_SYSTEMMEM,flat_readback.put(),nullptr),"Create complete native movie-atlas readback");
+                    gpu_check(integrated_device->GetRenderTargetData(backbuffer.get(),flat_readback.get()),
+                        "Read both flat-source atlas halves before spatial projection");
+                    D3DLOCKED_RECT copied{};
+                    gpu_check(flat_readback->LockRect(&copied,nullptr,D3DLOCK_READONLY),"Lock copied movie atlas");
+                    bool exact=true;
+                    for (UINT y=0;y<256;++y) for (UINT x=0;x<512;++x)
+                        exact &= reinterpret_cast<const DWORD*>(static_cast<const char*>(copied.pBits)+y*copied.Pitch)[x]
+                            ==video_pixel(x%256,y);
+                    gpu_check(flat_readback->UnlockRect(),"Unlock copied movie atlas");
+                    require(exact,"Native movie upload failed to preserve the complete source in both atlas halves");
+                }
+                if (mock.flat_test && f%5==3) {
+                    if (!offscreen_atlas.get()) {
+                        gpu_check(integrated_device->CreateTexture(512,256,1,D3DUSAGE_RENDERTARGET,
+                            D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,offscreen_atlas.put(),nullptr),"Create isolated offscreen stereo target");
+                        tag_atlas_texture(*offscreen_atlas.get(),OutlastTargetRole::scene_color,256,256);
+                    }
+                    Com<IDirect3DSurface9> image,backbuffer,offscreen;
+                    gpu_check(integrated_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,backbuffer.put()),
+                        "Get stereo-world target for partial-copy isolation");
+                    if (f==3) {
+                        const auto update_source=integrated_device->UpdateSurface(nullptr,nullptr,backbuffer.get(),nullptr);
+                        const auto update_dest=integrated_device->UpdateSurface(backbuffer.get(),nullptr,nullptr,nullptr);
+                        const auto stretch_source=integrated_device->StretchRect(nullptr,nullptr,backbuffer.get(),nullptr,D3DTEXF_NONE);
+                        const auto stretch_dest=integrated_device->StretchRect(backbuffer.get(),nullptr,nullptr,nullptr,D3DTEXF_NONE);
+                        require(update_source==D3DERR_INVALIDCALL && update_dest==D3DERR_INVALIDCALL &&
+                            stretch_source==D3DERR_INVALIDCALL && stretch_dest==D3DERR_INVALIDCALL,
+                            "Native copy hooks did not preserve invalid-argument results");
+                    }
+                    gpu_check(offscreen_atlas->GetSurfaceLevel(0,offscreen.put()),"Get isolated offscreen atlas");
+                    const RECT corner{0,0,1,1};const POINT offset{};
+                    if (flat_upload) {
+                        gpu_check(integrated_device->UpdateSurface(upload_source.get(),nullptr,offscreen.get(),nullptr),
+                            "Keep full offscreen mono uploads out of headset presentation selection");
+                        gpu_check(integrated_device->UpdateSurface(upload_source.get(),&corner,backbuffer.get(),&offset),
+                            "Keep partial mono uploads from flattening the stereo world");
+                    } else {
+                        gpu_check(flat_texture->GetSurfaceLevel(0,image.put()),"Get offscreen mono-copy source");
+                        gpu_check(integrated_device->StretchRect(image.get(),nullptr,offscreen.get(),nullptr,D3DTEXF_NONE),
+                            "Keep full offscreen mono copies out of headset presentation selection");
+                        gpu_check(integrated_device->StretchRect(image.get(),&corner,backbuffer.get(),&corner,D3DTEXF_NONE),
+                            "Keep partial mono copies from flattening the stereo world");
+                    }
+                }
             };
             auto present_frame=[&]{gpu_check(integrated_device->Present(nullptr,nullptr,nullptr,nullptr),
                 "Present through integrated XR submission");};
@@ -671,7 +855,7 @@ int main(int argc,char** argv) {
                 "Native rumble did not acknowledge virtual controller zero");
             require(gamepad_vibration_stub(1,&vibration)==ERROR_SUCCESS,
                 "Native rumble changed an unrelated physical controller");
-            const bool active=(f+1)%5!=0 && (f+1)%3!=0;
+            const bool active=(f+1)%5!=0 && (input_chords || (f+1)%3!=0);
             require(bool(observed_joystick_focus)==active,
                 "XR-focused joystick polling remained tied to desktop keyboard focus");
             require(joystick_focus_site(focus_viewport.data())==0,
@@ -685,18 +869,39 @@ int main(int argc,char** argv) {
                     motion_mock::fake.last_haptic[hand].frequency==XR_FREQUENCY_UNSPECIFIED,
                     "Native motor output changed amplitude, duration or focus before XR submission");
             const auto& pad=observed_gamepad.Gamepad;
-            require(active?(pad.sThumbLX==9830 && pad.sThumbLY==19660 &&
-                pad.sThumbRX==-13107 && pad.sThumbRY==0 &&
+            if (input_chords) {
+                const unsigned step=f+1;
+                const WORD expected=step==9?XINPUT_GAMEPAD_RIGHT_THUMB:step==11?XINPUT_GAMEPAD_START:
+                    step==14?XINPUT_GAMEPAD_Y:step>=16 && step<=18?XINPUT_GAMEPAD_BACK:0;
+                const SHORT expected_x=step>=16 && step<=19?0:9830;
+                const SHORT expected_y=step>=16 && step<=18?0:step==19?-32768:19660;
+                require(pad.wButtons==expected &&
+                    pad.sThumbLX==(active?expected_x:0) && pad.sThumbLY==(active?expected_y:0) &&
+                    pad.sThumbRX==(active?-13107:0) && pad.sThumbRY==0,
+                    "Actual DLL leaked a consumed chord/gesture or lost a fresh action at frame "+
+                    std::to_string(step));
+                continue;
+            }
+            const double snap_yaw=snap_mode && mock.frame>=2?-3.14159265358979323846/12:0;
+            const auto move_x=SHORT(std::lround((std::cos(snap_yaw)*.3-std::sin(snap_yaw)*.6)*32767));
+            const auto move_y=SHORT(std::lround((std::sin(snap_yaw)*.3+std::cos(snap_yaw)*.6)*32767));
+            require(active?(std::abs(pad.sThumbLX-move_x)<=1 && std::abs(pad.sThumbLY-move_y)<=1 &&
+                pad.sThumbRX==((comfort_mode || snap_mode)?0:-13107) && pad.sThumbRY==0 &&
                 (pad.wButtons&(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X|XINPUT_GAMEPAD_RIGHT_THUMB))==
                 (XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_RIGHT_THUMB) &&
                 !(pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER)):
                 pad.wButtons==0 && pad.sThumbLX==0 && pad.sThumbRX==0,
                 "Native motion action/focus/skipped-frame or unavailable-body use isolation failed");
-            require(bool(pad.wButtons&XINPUT_GAMEPAD_B)==(active && !previous_motion_active),
-                "Held VR manual crouch did not produce exactly one native input edge");
-            previous_motion_active=active;
+            const bool crouch_edge=(pad.wButtons&XINPUT_GAMEPAD_B)!=0;
+            require(crouch_edge==(active && (f==7 || f==13)),
+                "Interrupted held crouch replayed or a fresh release/press lost its native edge");
+            crouch_edges+=crouch_edge;
         }
         require(motion_polls==20,"Native motion polling proof truncated");
+        require(input_chords || crouch_edges==2,"Fresh manual crouch edges were not exercised through the actual DLL");
+        if (input_chords)
+            std::cout<<"PASS: actual_dll_input_chords; both_stick_release_orders; pause_release_tail; "
+                "held_pad_sector; fresh_actions_recovered; native_polls=20\n";
         if (mock.floor_startup_test)
             std::cout<<"PASS: floor_startup_frames=20; zero_height_deferred; cached_positive_pose_deferred; "
                 <<"tracked_zero_deferred; measured_height_acquired_once; crouched_height_preserved\n";
@@ -711,19 +916,24 @@ int main(int argc,char** argv) {
         RuntimeStatistics counts{};require(statistics(&counts)!=FALSE,"Cannot read integrated mod counters");
         // Regular/replay masks, additionally split by menu clipping, each rebuilt after reset.
         const unsigned expected_state_allocations=mock.ui?8u:4u;
-        require(counts.state_block_allocations==expected_state_allocations && counts.state_block_captures==20,
+        const unsigned native_scenes=mock.flat_test?16u:20u;
+        const unsigned tracked_scenes=mock.flat_test?12u:16u;
+        require(counts.state_block_allocations==expected_state_allocations && counts.state_block_captures==native_scenes,
             "Caller-state blocks were not reused across draws and recreated after native reset; allocations="+
             std::to_string(counts.state_block_allocations)+"; captures="+std::to_string(counts.state_block_captures));
-        std::cout<<"PASS: caller_state_allocations="<<expected_state_allocations<<"; captures=20; reset_releases_cached_state; "
+        std::cout<<"PASS: caller_state_allocations="<<expected_state_allocations<<"; captures="<<native_scenes<<"; reset_releases_cached_state; "
             <<"per_draw_recapture_and_restoration\n";
-        require(counts.direct_xr_submissions==16,"Exact-extent gameplay retained an unnecessary stereo rescale");
+        require(counts.direct_xr_submissions==(mock.flat_test?8u:16u),
+            "Gameplay or flat-only frame used the wrong XR presentation path");
         require(mock.frame==20 && mock.submitted==16 && mock.blank==4 && mock.pixels==2097152 &&
-            !mock.failed && counts.frames==20 && counts.submitted==16 && counts.geometry_draws==20 &&
-            counts.tracked_views==((mock.ui && !ui_owned)?0u:16u) &&
-            counts.owned_culls==(mock.ui?0u:96u) && cull_checks==(mock.ui?0u:128u) &&
-            counts.crosshair_updates==20 && crosshair_updates==20 &&
-            counts.sphere_inside_culls==(mock.ui?0u:32u) &&
-            nonfinite_spheres==(mock.ui?0u:16u) &&
+            !mock.failed && counts.frames==20 && counts.submitted==16 &&
+            counts.geometry_draws==(mock.flat_test?24u:20u) &&
+            counts.world_panel_draws==(mock.flat_test?8u:0u) &&
+            counts.tracked_views==((mock.ui && !ui_owned)?0u:tracked_scenes) &&
+            counts.owned_culls==(mock.ui?0u:tracked_scenes*6) && cull_checks==(mock.ui?0u:tracked_scenes*8) &&
+            counts.crosshair_updates==native_scenes && crosshair_updates==native_scenes &&
+            counts.sphere_inside_culls==(mock.ui?0u:tracked_scenes*2) &&
+            nonfinite_spheres==(mock.ui?0u:tracked_scenes) &&
             counts.consumed_replay_calls>0 && counts.reset_count==1,
             "Integrated DLL proof was truncated or changed native ownership/submission/draw contracts");
         if (thread_handoff || thread_overlap)
@@ -734,10 +944,16 @@ int main(int argc,char** argv) {
             "Native translation stabilization did not cover every tracked projection");
         const float center[]{0,0,200,0},radius=1;
         require(sphere_stub(view_data.data()+0x3b0,center,&radius)==0,"Owned native culling scope leaked after dispatch");
+        RECT outside_bounds{};
+        const RECT expected_bounds=scene_number%2?RECT{}:RECT{96,96,128,128};
+        require(translucency_bounds_stub(renderer_data.data(),0,&outside_bounds)==(scene_number%2?0:1) &&
+            std::memcmp(&outside_bounds,&expected_bounds,sizeof(outside_bounds))==0,
+            "Tracked translucency bounds leaked outside native dispatch");
         int full=1;
         require(sphere_inside_stub(view_data.data()+0x3b0,center,&radius,&full)==0 && full==0,
             "Owned native sphere containment scope leaked after dispatch");
         const auto draws=counts.geometry_draws,replays=counts.consumed_replay_calls;
+        flat_readback.reset();upload_source.reset();flat_texture.reset();offscreen_atlas.reset();
         geometry_indices.reset();geometry_vertices.reset();object_records.reset();
         geometry_declaration.reset();replay_declaration.reset();original_vertex.reset();original_pixel.reset();
         integrated_device.reset();factory.reset();
@@ -755,11 +971,17 @@ int main(int argc,char** argv) {
         std::cout<<"; direct_xr_atlas="<<counts.direct_xr_submissions;
         std::cout<<"; native_sphere_inside_culls="<<counts.sphere_inside_culls;
         std::cout<<"; crosshair_updates_preserved="<<crosshair_updates<<"; crosshair_alpha=0; other_HUD_bytes_preserved";
+        std::cout<<"; translucency_bounds_checks="<<translucency_checks
+            <<"; empty_partial_mono_bounds_replaced; native_subviewport_and_foreign_renderers_preserved";
         if (thread_handoff || thread_overlap) std::cout<<"; serialized_thread_handoffs="<<counts.thread_handoffs;
         if (thread_overlap) std::cout<<"; simultaneous_present_requests_blocked=20";
         if (mock.ui) std::cout<<"; ui_classified_draws="<<counts.ui_draws<<"; ui_plane_draws="<<counts.ui_plane_draws
             <<"; ui_ray_checked_pixels="<<mock.ui_checked
             <<"; asymmetric_canted_FOV; yaw_pitch_roll; native_canvas_scissor_and_subviewport";
+        if (mock.flat_test) std::cout<<"; flat_stereo_panels=8; world_flat_world_cycles=4; "
+            <<"flat_only_and_late_fullscreen_mono_copy; independent_per_eye_flat_pixel_oracle";
+        if (flat_upload) std::cout<<"; UpdateSurface_full_and_partial_two_half_reference";
+        if (mock.dynamic_ipd) std::cout<<"; runtime_ipd_changes_mm=64,78,50,72; current_eye_layers_and_disparity";
         if (ui_scaleform) std::cout<<"; native_scaleform_scope";
         if (camera_tilt) std::cout<<"; native_body_pitch_roll=0.35,0.18; absolute_eye_centroids=64; headset_gravity_upright";
         if (camera_bob) {

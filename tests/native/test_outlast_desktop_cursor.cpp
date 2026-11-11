@@ -9,13 +9,15 @@ BOOL result=TRUE;
 BOOL WINAPI clip(const RECT* rectangle) {++clips;last_rectangle=rectangle;return result;}
 BOOL WINAPI position(int x,int y) {++positions;last_x=x;last_y=y;return result;}
 BOOL WINAPI get_position(POINT* point) {if (point) *point={-300,700};return result;}
-void require(bool condition) {
+void require(bool condition,const char* message="Desktop cursor ownership/forwarding regression") {
     ++checks;
-    if (!condition) throw std::runtime_error("Desktop cursor ownership/forwarding regression");
+    if (!condition) throw std::runtime_error(message);
 }
 }
-int main() {
+int main(int argc,char** argv) {
     try {
+        const bool fixed_hand_fault=argc==2 && std::string(argv[1])=="--fault-fixed-menu-hand";
+        require(argc==1 || fixed_hand_fault);
         constexpr std::uintptr_t base=0x140000000ull,extent=0x3000000;
         olvr::OutlastDesktopCursor policy(base,extent);
         const RECT rectangle{100,100,900,700};
@@ -75,6 +77,40 @@ int main() {
         require(!press.update(true,true,1,0));
         require(press.update(true,true,1,1));
         require(!press.update(true,true,0,1));
+        for (unsigned initial=0;initial<2;++initial) {
+            olvr::ControllerMenuPress switching;
+            unsigned selected=initial;
+            std::array<bool,2> tracked{true,true};
+            std::array<float,2> triggers{};
+            bool enabled=true,hit=true;
+            auto tick=[&] {
+                const auto next=switching.select_hand(enabled,selected,tracked,triggers);
+                if (!fixed_hand_fault) selected=next;
+                return switching.update(enabled && tracked[selected],hit,selected,triggers[selected]);
+            };
+            require(!tick());
+            triggers[1-initial]=1;
+            require(tick() && selected==1-initial,
+                "Fresh off-hand trigger did not switch and click the menu pointer");
+            triggers[initial]=1;
+            require(tick() && selected==1-initial,"Held menu click was stolen by the other hand");
+            triggers[1-initial]=0;require(!tick());
+            require(!tick() && selected==1-initial,"Previously held trigger replayed after click release");
+            triggers={};require(!tick());
+            triggers[initial]=1;
+            require(tick() && selected==initial,"Fresh trigger did not return the menu pointer");
+            enabled=false;require(!tick());enabled=true;
+            require(!tick(),"Reopening a menu replayed a held trigger");
+            triggers={};require(!tick());triggers={1,1};
+            require(tick() && selected==initial,"Simultaneous menu triggers chose an unstable hand");
+            tracked[initial]=false;
+            require(!tick(),"Lost menu-hand tracking retained a pressed click");
+            require(!tick(),"Fallback menu hand replayed a trigger held before tracking loss");
+            tracked={true,true};triggers={};require(!tick());
+            hit=false;triggers[1-selected]=1;
+            require(!tick(),"Off-panel hand switch clicked a menu item");
+            hit=true;require(!tick(),"Moving a held trigger onto the panel generated a click");
+        }
         require(!press.update(true,true,0,0));
         require(press.update(true,true,0,1));
         require(!press.update(true,false,0,1));

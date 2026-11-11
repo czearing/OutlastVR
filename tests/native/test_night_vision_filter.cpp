@@ -19,7 +19,9 @@ int main() {
         D3D9NightVision filter(device);
         IsolatedD3D12DrawCounter counter(isolated.translation_device(),true,isolated.translation_queue());
         unsigned checked=0;
-        for (unsigned repeat=0;repeat<3;++repeat) {
+        for (unsigned repeat=0;repeat<5;++repeat) {
+            const bool night_vision=repeat!=3;
+            const float vignette=repeat>=3?.8f:0.f;
             D3DLOCKED_RECT lock{};
             gpu_check(upload->LockRect(&lock,nullptr,0),"Write different-eye native filter inputs");
             auto input=[&](UINT x,UINT y) {
@@ -36,7 +38,7 @@ int main() {
             gpu_check(device.SetScissorRect(&scissor),"Set caller scissor");
             gpu_check(device.SetRenderState(D3DRS_SCISSORTESTENABLE,TRUE),"Set caller scissor state");
             counter.reset();
-            filter.draw(*target.get());
+            filter.draw(*target.get(),night_vision,vignette);
             gpu_check(device.GetRenderTargetData(target.get(),readback.get()),"Read real GPU filter result");
             gpu_check(readback->LockRect(&lock,nullptr,D3DLOCK_READONLY),"Synchronize real GPU filter pixels");
             bool equal=true;
@@ -46,9 +48,16 @@ int main() {
                 const auto original=input(x,y);
                 const double luminance=(.2126*((original>>16)&255)+.0722*(original&255))/255.;
                 const double green=std::pow(std::min(1.,luminance*1.6),.65)*255.;
+                const double eye_x=(double(x%(width/2))+.5)/(width/2)*2-1;
+                const double eye_y=(double(y)+.5)/height*2-1;
+                const double radius=std::sqrt(eye_x*eye_x+eye_y*eye_y);
+                const double edge=std::clamp((radius-.55)/.45,0.,1.);
+                const double visibility=1-vignette*edge*edge*(3-2*edge);
                 for (unsigned channel=0;channel<3;++channel) {
                     const auto factor=channel==0?.22:channel==1?1.:.12;
-                    if (std::abs(int((value>>(channel*8))&255)-green*factor)>2.) equal=false;
+                    const double expected=(night_vision?green*factor:
+                        double((original>>(channel*8))&255))*visibility;
+                    if (std::abs(int((value>>(channel*8))&255)-expected)>2.) equal=false;
                 }
                 if ((value>>24)!=255) equal=false;
                 ++checked;

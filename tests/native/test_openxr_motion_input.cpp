@@ -30,7 +30,10 @@ struct Fake {
     std::array<bool,2> vibrating{};
     bool focused=true,active=true,lost_left=false,bad_pose=false,bad_axis=false,partial_failure=false;
     bool stale_fault=false,swap_fault=false,all_unsupported=false;
+    std::string supported_profile;
+    unsigned accepted_profiles=0;
     bool neutral_controls=false,estimated_left=false;
+    bool face_buttons=true,menu_button=true;
     bool fixture_crouch=false,fixture_notes=false,fixture_menu=false;
     float fixture_use=0;
     std::array<float,2> fixture_grab{};
@@ -40,6 +43,7 @@ struct Fake {
     std::array<XrVector3f,2> fixture_offsets{};
     std::array<XrQuaternionf,2> fixture_rotations{{{0,0,0,1},{0,0,0,1}}};
     bool fixture_independent_aim=false;
+    bool fixture_aim_tracked=true;
     std::array<XrQuaternionf,2> fixture_aim_rotations{{{0,0,0,1},{0,0,0,1}}};
     XrTime first_time=0;
     bool left(XrPath path) const {return path==paths.at("/user/hand/left");}
@@ -87,7 +91,13 @@ XrResult XRAPI_CALL suggest(XrInstance instance,const XrInteractionProfileSugges
     for (uint32_t i=0;i<info->countSuggestedBindings;++i)
         expect(fake.actions.count(info->suggestedBindings[i].action)==1 &&
             info->suggestedBindings[i].binding!=XR_NULL_PATH,"Invalid suggested action binding");
-    ++fake.suggestions;return fake.all_unsupported?XR_ERROR_PATH_UNSUPPORTED:XR_SUCCESS;
+    ++fake.suggestions;
+    const auto supported=fake.paths.find(fake.supported_profile);
+    if (fake.all_unsupported || (!fake.supported_profile.empty() &&
+        (supported==fake.paths.end() || supported->second!=info->interactionProfile)))
+        return XR_ERROR_PATH_UNSUPPORTED;
+    ++fake.accepted_profiles;
+    return XR_SUCCESS;
 }
 XrResult XRAPI_CALL attach(XrSession session,const XrSessionActionSetsAttachInfo* info) {
     expect(session==fake.session && info->countActionSets==1 && info->actionSets[0]==fake.set &&
@@ -122,6 +132,9 @@ XrResult XRAPI_CALL float_state(XrSession,const XrActionStateGetInfo* info,XrAct
 XrResult XRAPI_CALL bool_state(XrSession,const XrActionStateGetInfo* info,XrActionStateBoolean* out) {
     query(info,XR_ACTION_TYPE_BOOLEAN_INPUT);
     out->isActive=fake.active;out->currentState=!fake.neutral_controls && !fake.left(info->subactionPath);
+    const auto& name=fake.actions.at(info->action).first;
+    if ((!fake.face_buttons && (name=="primary" || name=="secondary")) ||
+        (!fake.menu_button && name=="menu")) out->isActive=XR_FALSE;
     if (fake.neutral_controls) {
         const auto& action=fake.actions.at(info->action).first;
         const bool left=fake.left(info->subactionPath);
@@ -162,6 +175,8 @@ XrResult XRAPI_CALL locate(XrSpace space,XrSpace base,XrTime time,XrSpaceLocatio
             fake.fixture_head.y-.45f+delta.y,fake.fixture_head.z-.4f+delta.z};
     }
     out->pose.orientation=fake.fixture_rotations[left?0:1];
+    if (!fake.fixture_aim_tracked && fake.actions.at(binding.first).first=="aim_pose")
+        out->locationFlags=0;
     if (fake.fixture_independent_aim && fake.actions.at(binding.first).first=="aim_pose")
         out->pose.orientation=fake.fixture_aim_rotations[left?0:1];
     if (fake.bad_pose) out->pose.orientation.w=.5f;
@@ -208,11 +223,97 @@ XrResult XRAPI_CALL resolve(XrInstance,const char* name,PFN_xrVoidFunction* out)
 int main(int argc,char** argv) {
     using namespace motion_mock;
     try {
+        const std::string mode=argc==2?argv[1]:"";
+        const bool pause_test=mode=="--pause-chord";
+        const bool sector_test=mode=="--fallback-gestures";
         if (argc==2) {
             fake.stale_fault=std::strcmp(argv[1],"--fault-stale")==0;
             fake.swap_fault=std::strcmp(argv[1],"--fault-hands")==0;
-            expect(fake.stale_fault || fake.swap_fault,"Unknown motion control");
+            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test,"Unknown motion control");
         } else expect(argc==1,"Invalid motion test arguments");
+        if (pause_test || sector_test) {
+            fake.neutral_controls=true;fake.menu_button=!pause_test;fake.face_buttons=pause_test;
+            {
+                OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                XrTime clock=100;
+                bool pause_pad=false;
+                auto sample=[&] {
+                    if (pause_test && pause_pad) {
+                        fake.fixture_sprint=fake.fixture_reload;fake.fixture_nv=fake.fixture_crouch;
+                        fake.fixture_move=fake.fixture_turn={0,-1};
+                    }
+                    return input.sample(fake.base,++clock);
+                };
+                if (pause_test) for (bool pad:{false,true}) for (unsigned released=0;released<2;++released) {
+                    pause_pad=pad;fake.face_buttons=!pad;
+                    fake.fixture_reload=fake.fixture_crouch=false;sample();
+                    fake.fixture_reload=fake.fixture_crouch=true;
+                    expect(sample().menu,"Pause chord did not open the menu");
+                    (released?fake.fixture_crouch:fake.fixture_reload)=false;
+                    auto tail=sample();
+                    expect(!tail.menu && !tail.hands[0].secondary && !tail.hands[1].secondary,
+                        "Partially released pause chord leaked crouch/reload");
+                    fake.menu_button=true;tail=sample();
+                    expect(!tail.hands[0].secondary && !tail.hands[1].secondary,
+                        "Changing the menu binding exposed a consumed pause button");
+                    fake.menu_button=false;
+                    fake.fixture_reload=fake.fixture_crouch=true;
+                    expect(!sample().menu,"Pause chord rearmed before both buttons were released");
+                    fake.focused=false;sample();fake.focused=true;
+                    expect(!sample().menu,"Focus recovery replayed a held pause chord");
+                    fake.fixture_reload=false;sample();fake.fixture_reload=true;tail=sample();
+                    expect(!tail.menu && !tail.hands[0].secondary && !tail.hands[1].secondary,
+                        "A partially released pause gesture rearmed after focus recovery");
+                    fake.active=false;sample();fake.active=true;tail=sample();
+                    expect(!tail.menu && !tail.hands[0].secondary && !tail.hands[1].secondary,
+                        "Controller reconnection replayed a held pause chord");
+                    fake.fixture_reload=fake.fixture_crouch=false;sample();
+                    fake.fixture_reload=true;
+                    expect(sample().hands[0].secondary,"A fresh secondary action stayed blocked after the chord");
+                    fake.fixture_reload=false;sample();
+                }
+                if (sector_test) for (unsigned hand=0;hand<2;++hand) {
+                    auto& click=hand?fake.fixture_nv:fake.fixture_sprint;
+                    auto& axis=hand?fake.fixture_turn:fake.fixture_move;
+                    click=false;axis={};sample();
+                    click=true;axis={0,1};
+                    expect(sample().hands[hand].primary,"Upward pad click did not select primary");
+                    axis={};
+                    auto held=sample();
+                    expect(held.hands[hand].primary && !held.hands[hand].stick_click,
+                        "Held pad sector click became a sprint/filter click at center");
+                    axis={0,-1};held=sample();
+                    expect(held.hands[hand].primary && !held.hands[hand].secondary,
+                        "Held pad click changed from primary to secondary without release");
+                    fake.focused=false;sample();fake.focused=true;held=sample();
+                    expect(!held.hands[hand].primary && !held.hands[hand].secondary &&
+                        !held.hands[hand].stick_click,"Focus recovery replayed a consumed pad gesture");
+                    click=false;sample();click=true;
+                    expect(sample().hands[hand].secondary,"A fresh downward pad click stayed blocked");
+                    fake.face_buttons=true;held=sample();
+                    expect(!held.hands[hand].stick_click,
+                        "A controller profile change exposed a consumed pad click");
+                    fake.face_buttons=false;held=sample();
+                    expect(!held.hands[hand].primary && !held.hands[hand].secondary &&
+                        !held.hands[hand].stick_click,"A held pad gesture replayed after a profile change");
+                    click=false;sample();click=true;sample();
+                    fake.active=false;sample();fake.active=true;held=sample();
+                    expect(!held.hands[hand].secondary && !held.hands[hand].stick_click,
+                        "Controller reconnection replayed a consumed pad gesture");
+                    click=false;axis={};sample();click=true;
+                    expect(sample().hands[hand].stick_click,"A fresh center click stayed blocked");
+                    axis={0,1};held=sample();
+                    expect(held.hands[hand].stick_click && !held.hands[hand].primary,
+                        "Moving a held center click generated an extra face-button action");
+                    click=false;axis={};sample();
+                }
+            }
+            expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                "Gesture-test controller handles leaked");
+            std::cout<<"PASS: "<<(pause_test?"pause_chord_release_and_focus_rearm":
+                "pad_gesture_press_ownership_and_focus_rearm")<<"; both_hands; cleanup_preserved\n";
+            return 0;
+        }
         {
             OpenXRMotionInput input(&resolve,fake.instance,fake.session);
             expect(fake.suggestions==4 && fake.attached==1 && fake.actions.size()==11,
@@ -251,6 +352,30 @@ int main(int argc,char** argv) {
             const auto released=input.sample(fake.base,3700);
             expect(!released.hands[0].stick_click && !released.hands[1].primary,
                 "Native jump/sprint fixture retained released inputs");
+            fake.face_buttons=false;fake.menu_button=false;
+            fake.fixture_sprint=fake.fixture_nv=true;
+            fake.fixture_move={0,1};fake.fixture_turn={0,-1};
+            const auto pads=input.sample(fake.base,3750);
+            expect(pads.hands[0].primary && pads.hands[1].secondary &&
+                !pads.hands[0].stick_click && !pads.hands[1].stick_click &&
+                pads.move.y==0 && pads.turn.y==0,
+                "Face-less controller sectors leaked locomotion or omitted native actions");
+            fake.fixture_sprint=fake.fixture_nv=false;input.sample(fake.base,3751);
+            fake.fixture_sprint=fake.fixture_nv=true;
+            fake.fixture_move={0,-1};
+            const auto pause=input.sample(fake.base,3760);
+            expect(pause.menu && !pause.hands[0].secondary && !pause.hands[1].secondary,
+                "Missing menu binding did not provide an isolated pause chord");
+            fake.fixture_sprint=fake.fixture_nv=false;input.sample(fake.base,3761);
+            fake.fixture_sprint=fake.fixture_nv=true;
+            fake.fixture_move={1,0};fake.fixture_turn={1,0};
+            const auto side=input.sample(fake.base,3770);
+            expect(side.hands[0].stick_click && side.hands[1].stick_click &&
+                !side.hands[0].primary && !side.hands[1].secondary,
+                "Face-less controller fallback removed sprint/filter/recenter clicks");
+            fake.face_buttons=fake.menu_button=true;
+            fake.fixture_sprint=fake.fixture_nv=false;
+            fake.fixture_move=fake.fixture_turn={};
             fake.neutral_controls=false;
             fake.estimated_left=true;
             const auto estimated=input.sample(fake.base,3900);
@@ -316,6 +441,24 @@ int main(int argc,char** argv) {
         catch (const std::runtime_error&) {rejected_profiles=true;}
         expect(rejected_profiles && fake.attached==0 && fake.destroyed_sets==1,
             "Unsupported controller inventory falsely succeeded");
+        for (const auto* profile:{
+            "/interaction_profiles/oculus/touch_controller",
+            "/interaction_profiles/valve/index_controller",
+            "/interaction_profiles/microsoft/motion_controller",
+            "/interaction_profiles/htc/vive_controller"}) {
+            fake=Fake{};fake.supported_profile=profile;fake.neutral_controls=true;
+            fake.fixture_move={.4f,0};fake.fixture_turn={-.6f,0};fake.fixture_use=.8f;
+            {
+                OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                const auto frame=input.sample(fake.base,9000);
+                expect(fake.suggestions==4 && fake.accepted_profiles==1 && fake.attached==1 &&
+                    frame.focused && frame.hands[0].grip_tracked && frame.hands[1].aim_tracked &&
+                    frame.move.x==.4f && frame.turn.x==-.6f && frame.hands[1].trigger==.8f,
+                    "Rejecting optional profiles disabled the one supported controller profile");
+            }
+            expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                "Partially supported controller initialization leaked owned handles");
+        }
         std::cout<<"PASS: OpenXR motion-input checks="<<checks
             <<"; predicted_time_and_hand_identity; inactive_focus_and_tracking_loss; "
             <<"analog_buttons_haptics; partial_cleanup; no_game_or_native_IK_claim; "

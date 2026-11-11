@@ -46,16 +46,15 @@ public:
         if (!placed_) {
             auto upright=eyes;
             const auto center=scale(add(eyes[0].position,eyes[1].position),.5f);
-            const auto q=eyes[0].orientation;
+            const auto q=binocular_orientation(eyes);
             const auto forward=rotate(q,{0,0,-1}),right=rotate(q,{1,0,0});
             const float yaw=forward.x*forward.x+forward.z*forward.z>1e-6f?
                 std::atan2(-forward.x,-forward.z):std::atan2(-right.z,right.x);
             const Quaternion heading{0,std::sin(yaw*.5f),0,std::cos(yaw*.5f)};
-            const auto offset=scale(rotate(heading,{1,0,0}),
-                std::sqrt(dot(add(eyes[1].position,scale(eyes[0].position,-1)),
-                              add(eyes[1].position,scale(eyes[0].position,-1))))*.5f);
+            const auto correction=multiply(heading,{-q.x,-q.y,-q.z,q.w});
             for (unsigned eye=0;eye<2;++eye)
-                upright[eye]={add(center,scale(offset,eye?1.f:-1.f)),heading};
+                upright[eye]={add(center,rotate(correction,add(eyes[eye].position,scale(center,-1)))),
+                    multiply(correction,eyes[eye].orientation)};
             const auto initial=headlocked_ui_constants(upright,fovs,aspect);
             const auto neutral=eye_constants(frame,upright[0],fovs[0],.01f,1000);
             Matrix4 projection{},panel{};

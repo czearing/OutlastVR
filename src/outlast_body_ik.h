@@ -429,7 +429,16 @@ public:
             std::memcpy(atoms,original_.data(),original_.size()*sizeof(BoneAtom));
             return true;
         }
-        return false;
+        bool restored=false;
+        if (atoms)
+            for (std::size_t i=0;i<applied_.size();++i)
+                // Native partial evaluations can replace only some cached atoms.
+                if (std::memcmp(&atoms[i],&applied_[i],sizeof(BoneAtom))==0 &&
+                    std::memcmp(&original_[i],&applied_[i],sizeof(BoneAtom))!=0) {
+                    atoms[i]=original_[i];
+                    restored=true;
+                }
+        return restored;
     }
     BodyIKResult apply(NativeSkeleton& skeleton,const BodyIKTargets& targets) {
         if (!owns(skeleton)) throw std::logic_error("Native body IK has no matching calibrated rig");
@@ -464,7 +473,8 @@ public:
             if (targets.compensate_native_crouch && targets.native_crouched &&
                 !targets.stance_transition && !crouch_foot_reference_)
                 crouch_foot_reference_=std::array<Vec3,2>{original_[feet[0]].position,original_[feet[1]].position};
-            if (!targets.compensate_native_crouch) crouch_foot_reference_.reset();
+            if (!targets.compensate_native_crouch || !targets.native_crouched)
+                crouch_foot_reference_.reset();
         }
         if (!targets.compensate_native_crouch)
             for (std::size_t i=4;i<skinning_.size();++i)

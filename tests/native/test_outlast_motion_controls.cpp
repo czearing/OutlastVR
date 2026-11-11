@@ -102,6 +102,49 @@ int main() {
             require(output.Gamepad.wButtons==(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X),
                 "Reacquisition latch blocked a genuinely fresh gameplay interaction");
         }
+        for (const bool left_handed:{false,true}) {
+            OutlastMotionControls paused;
+            OutlastComfortSettings options;options.left_handed=left_handed;paused.configure(options);
+            MotionFrame input{};input.focused=true;
+            paused.publish(input,5000);
+            paused.physical_stance(true,0,false,false,5001);
+            input.hands[options.primary_hand()].secondary=true;paused.publish(input,5100);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5101,true);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_B,
+                "Gameplay crouch ownership swallowed the menu back button");
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5102,true);
+            require(output.Gamepad.wButtons==0,"A held menu back button repeated");
+            input.hands[options.primary_hand()].secondary=false;paused.publish(input,5200);
+            paused.physical_stance(true,-.5f,false,false,5201);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5202,true);
+            require(output.Gamepad.wButtons==0,"A queued physical crouch request became menu back");
+            paused.physical_stance(true,-.5f,false,false,5203);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5204);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_B,
+                "Closing the menu lost an unsent physical crouch request");
+            XINPUT_STATE external{};external.Gamepad.wButtons=XINPUT_GAMEPAD_B;
+            paused.state(0,&output,ERROR_SUCCESS,external,5205,true);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_B,
+                "Menu back isolation suppressed the physical gamepad");
+            paused.physical_stance(true,-.5f,true,false,5206);
+            paused.physical_stance(true,0,true,false,5207);
+            paused.physical_stance(true,0,false,false,5208);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5209);
+            require(output.Gamepad.wButtons==0,
+                "A native stance acknowledgment left an obsolete toggle queued");
+            paused.physical_stance(true,-.5f,false,false,5210);
+            paused.physical_stance(false,-.5f,false,false,5211);
+            paused.physical_stance(true,-.5f,false,false,5212);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5213);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_B,
+                "An ineligible interval delayed a crouch request that was never sent");
+            paused.physical_stance(true,-.5f,true,false,5214);
+            paused.physical_stance(true,0,true,false,5215);
+            paused.physical_stance(true,-.5f,true,false,5216);
+            paused.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5217);
+            require(output.Gamepad.wButtons==0,
+                "A reversed physical stance left an obsolete toggle queued");
+        }
         for (unsigned interruption=0;interruption<4;++interruption) {
             OutlastMotionControls interaction;
             MotionFrame held{};held.focused=true;held.hands[1].aim_tracked=true;
@@ -306,6 +349,8 @@ int main() {
         {
             OutlastMotionControls standalone;
             MotionFrame input{};input.focused=true;input.hands[1].secondary=true;
+            auto released=input;released.hands[1].secondary=false;
+            standalone.publish(released,4999999);
             for (unsigned i=0;i<120;++i) {
                 standalone.publish(input,5000000+i);
                 standalone.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5000000+i);
@@ -313,6 +358,38 @@ int main() {
                     "Manual crouch outside an eligible body state repeated while held");
             }
         }
+        for (const auto clock:{UINT64(900),UINT64(251001)}) {
+            OutlastMotionControls stale;
+            MotionFrame input{};input.focused=true;
+            stale.publish(input,1000);
+            require(!stale.physical_stance(true,-.5f,false,false,clock),
+                "Stale/regressed tracking retained physical crouch ownership");
+        }
+        for (const bool eligible:{false,true})
+            for (unsigned interruption=0;interruption<3;++interruption) {
+                OutlastMotionControls interrupted;
+                MotionFrame input{};input.focused=true;
+                interrupted.publish(input,1000);
+                input.hands[1].secondary=true;
+                interrupted.publish(input,1100);
+                UINT64 clock=1300;
+                if (interruption==0) interrupted.publish({},1200);
+                if (interruption==1) clock=252000;
+                if (interruption==2) clock=900;
+                interrupted.publish(input,clock);
+                interrupted.physical_stance(eligible,0,false,false,clock+1);
+                interrupted.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,clock+2);
+                require(!(output.Gamepad.wButtons&XINPUT_GAMEPAD_B),
+                    "Focus/time interruption replayed a held or unconsumed crouch press");
+                input.hands[1].secondary=false;
+                interrupted.publish(input,clock+100);
+                input.hands[1].secondary=true;
+                interrupted.publish(input,clock+200);
+                interrupted.physical_stance(eligible,0,false,false,clock+201);
+                interrupted.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,clock+202);
+                require(output.Gamepad.wButtons&XINPUT_GAMEPAD_B,
+                    "Crouch failed to rearm after a genuinely fresh release/press");
+            }
         std::thread writer([&] {for (unsigned i=0;i<10000;++i) controls.publish(i%2?frame:MotionFrame{},5000+i);});
         for (unsigned i=0;i<10000;++i) {
             const auto snapshot=controls.sample(15000);

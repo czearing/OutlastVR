@@ -495,7 +495,11 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
     for (std::size_t index=0;index<shaders_.tracked_uniforms.size();++index) {
         const auto& uniform=shaders_.tracked_uniforms[index];
         if (!reconstruction_ || !uniform.rows || uniform.rows>4 ||
-            uniform.texture_row<8 || uniform.texture_row+uniform.rows>shaders_.view_texture_width)
+            uniform.texture_row<8 || uniform.texture_row+uniform.rows>shaders_.view_texture_width ||
+            (uniform.camera_delta_row &&
+             (uniform.vertex || uniform.kind!=sm3::TrackedUniformKind::material_camera ||
+              uniform.camera_delta_row!=uniform.texture_row+uniform.rows ||
+              uniform.camera_delta_row>=shaders_.view_texture_width)))
             throw std::invalid_argument("Tracked shader requires bounded native reconstruction records");
         auto& original=original_uniforms_[index];
         original.fill(0);
@@ -522,6 +526,17 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
                 float original[16]{};
                 std::copy_n(original_uniforms_[uniform_index].begin(),uniform.rows*4,original);
                 if (uniform.kind==sm3::TrackedUniformKind::material_camera) {
+                    if (uniform.camera_delta_row) {
+                        auto* delta=output+uniform.camera_delta_row*4;
+                        for (unsigned axis=0;axis<3;++axis) {
+                            // Keep small translated positions out of absolute-world float cancellation.
+                            const double value=double(original[axis])+double(views[eye][20+axis])-
+                                double(views[eye][16+axis]);
+                            if (!std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max())
+                                throw std::overflow_error("Material camera delta is nonfinite");
+                            delta[axis]=static_cast<float>(value);
+                        }
+                    }
                     for (unsigned axis=0;axis<3;++axis) original[axis]=views[eye][16+axis]-views[eye][20+axis];
                     std::copy_n(original,4,output+uniform.texture_row*4);
                 } else if (uniform.kind==sm3::TrackedUniformKind::camera_direction) {

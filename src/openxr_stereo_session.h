@@ -166,11 +166,20 @@ public:
                                                        2, &count, configuration.data()), "Read stereo extent");
             if (count != 2)
                 throw std::runtime_error("OpenXR view count changed");
-            width_ = std::max(configuration[0].recommendedImageRectWidth, configuration[1].recommendedImageRectWidth);
-            height_ = std::max(configuration[0].recommendedImageRectHeight, configuration[1].recommendedImageRectHeight);
-            if (!width_ || !height_ || width_ > 8192 || height_ > 8192 ||
-                width_ > configuration[0].maxImageRectWidth || width_ > configuration[1].maxImageRectWidth ||
-                height_ > configuration[0].maxImageRectHeight || height_ > configuration[1].maxImageRectHeight)
+            for (const auto& view:configuration)
+                if (!view.recommendedImageRectWidth || !view.recommendedImageRectHeight ||
+                    view.recommendedImageRectWidth>view.maxImageRectWidth ||
+                    view.recommendedImageRectHeight>view.maxImageRectHeight ||
+                    !view.recommendedSwapchainSampleCount ||
+                    view.recommendedSwapchainSampleCount>view.maxSwapchainSampleCount)
+                    throw std::runtime_error("Runtime provided invalid stereo view limits");
+            width_ = std::min(std::max(configuration[0].recommendedImageRectWidth,
+                configuration[1].recommendedImageRectWidth),
+                std::min(configuration[0].maxImageRectWidth,configuration[1].maxImageRectWidth));
+            height_ = std::min(std::max(configuration[0].recommendedImageRectHeight,
+                configuration[1].recommendedImageRectHeight),
+                std::min(configuration[0].maxImageRectHeight,configuration[1].maxImageRectHeight));
+            if (!width_ || !height_ || width_ > 8192 || height_ > 8192)
                 throw std::runtime_error("Runtime recommends incompatible stereo dimensions");
             count = 0;
             xr_check(EnumerateEnvironmentBlendModes_(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
@@ -310,7 +319,7 @@ public:
                         xr_check(BeginSession_(session_, &begin), "xrBeginSession");
                         running_ = true;
                     } else if (state.state == XR_SESSION_STATE_STOPPING && running_) {
-                        if (motion_) motion_->stop_vibrations();
+                        if (motion_) motion_->suspend();
                         xr_check(EndSession_(session_), "xrEndSession");
                         running_ = false;
                     } else if (state.state == XR_SESSION_STATE_EXITING || state.state == XR_SESSION_STATE_LOSS_PENDING) {
@@ -323,7 +332,7 @@ public:
             event.type = XR_TYPE_EVENT_DATA_BUFFER;
         }
         if (!running_) {
-            if (motion_) motion_->stop_vibrations();
+            if (motion_) motion_->suspend();
             return false;
         }
         XrFrameWaitInfo wait{};
@@ -342,7 +351,7 @@ public:
         xr_check(BeginFrame_(session_, &begin), "xrBeginFrame");
         frame_open_ = true;
         if (!frame_.shouldRender) {
-            if (motion_) motion_->stop_vibrations();
+            if (motion_) motion_->suspend();
             finish();
             return false;
         }
@@ -358,8 +367,12 @@ public:
             uint32_t count = 0;
             xr_check(LocateViews_(session_, &locate, &state, 2, &count, views_.data()), "xrLocateViews");
             const auto required = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
-            if (count != 2 || (state.viewStateFlags & required) != required ||
-                !valid_view(views_[0]) || !valid_view(views_[1]))
+            if ((state.viewStateFlags & required) != required) {
+                if (motion_) motion_->suspend();
+                finish();
+                return false;
+            }
+            if (count != 2 || !valid_view(views_[0]) || !valid_view(views_[1]))
                 throw std::runtime_error("OpenXR did not provide two valid stereo poses and FOVs");
             view_state_flags_=state.viewStateFlags;
             renderable_ = true;
@@ -376,7 +389,7 @@ public:
 
     void cancel_frame() {
         motion_frame_={};
-        if (motion_) motion_->stop_vibrations();
+        if (motion_) motion_->suspend();
         finish();
     }
     void drain_transfers() { if (transfer_) transfer_->wait(); }

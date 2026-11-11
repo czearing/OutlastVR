@@ -5,6 +5,7 @@
 #include "outlast_native_view.h"
 #include "outlast_locomotion_camera.h"
 #include "outlast_motion_controls.h"
+#include "outlast_comfort.h"
 #include "outlast_native_use.h"
 #include "outlast_camcorder.h"
 #include "outlast_native_camcorder.h"
@@ -108,6 +109,7 @@ class Runtime {
     using TextureSurface=HRESULT(WINAPI*)(IDirect3DTexture9*,UINT,IDirect3DSurface9**);
     using Clear=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
     using Stretch=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*,const RECT*,IDirect3DSurface9*,const RECT*,D3DTEXTUREFILTERTYPE);
+    using UpdateSurface=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*,const RECT*,IDirect3DSurface9*,const POINT*);
     using Fill=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*,const RECT*,D3DCOLOR);
     using DrawIndexed=HRESULT(WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,INT,UINT,UINT,UINT,UINT);
     using DrawPrimitive=HRESULT(WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,UINT);
@@ -200,6 +202,7 @@ class Runtime {
     MenuMovieEntry menu_movie_=nullptr;
     bool menu_seen_=false;
     bool present_panel_=false;
+    bool last_present_panel_=false;
     WorldPanel panel_anchor_;
     std::atomic<bool> native_interactive_menu_{false};
     bool menu_overlay_=false;
@@ -215,6 +218,8 @@ class Runtime {
     std::ofstream camcorder_mesh_events_;
     OutlastCamcorder camcorder_controls_;
     OutlastConfig config_;
+    OutlastComfort comfort_;
+    float vignette_strength_=0;
     OutlastNightVision night_vision_;
     bool night_vision_enabled_=false;
     std::unique_ptr<D3D9NightVision> night_vision_filter_;
@@ -603,13 +608,14 @@ class Runtime {
         com_hook(&device,47,&set_viewport);com_hook(&device,48,&get_viewport);
         com_hook(&device,23,&create_texture);com_hook(&device,28,&create_target);
         com_hook(&device,29,&create_depth);com_hook(&device,43,&clear);
-        com_hook(&device,34,&stretch);com_hook(&device,35,&fill);
+        com_hook(&device,30,&update_surface);com_hook(&device,34,&stretch);com_hook(&device,35,&fill);
         com_hook(&device,81,&draw_primitive);com_hook(&device,82,&draw_indexed);
         com_hook(&device,83,&draw_up);com_hook(&device,84,&draw_indexed_up);
         com_hook(&device,17,&present);com_hook(&device,16,&reset);
         hooks_->enable_pending();create_final();
         ++stats_.devices;log("Native D3D9On12 device attached; single-pass atlas and real GPU XR transport enabled");
     }
+    EyePose relative_pose(EyePose pose) const {return comfort_.pose(recenter_.relative(pose));}
     bool begin_frame() {
         DiagnosticScope diagnostic(render_phase_,2);
         on_render_thread();
@@ -666,14 +672,21 @@ class Runtime {
             log("OpenXR origin change invalidated the standing floor reference; awaiting tracked positive height");
         }
         const auto flags=xr().view_state_flags();
+        const auto tracked_flags=XR_VIEW_STATE_POSITION_TRACKED_BIT|XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
+        const bool head_tracked=(flags&tracked_flags)==tracked_flags;
         const float measured_height=(absolute[0].position.y+absolute[1].position.y)*.5f;
         const bool acquire_floor=xr().floor_known() && !floor_reference_ready_ &&
             outlast_floor_reference_available(measured_height,
                 (flags&XR_VIEW_STATE_POSITION_TRACKED_BIT)!=0,(flags&XR_VIEW_STATE_ORIENTATION_TRACKED_BIT)!=0);
         const bool keyboard_recenter=!headless_probe && (GetAsyncKeyState(VK_F8)&1);
-        if (!recenter_.initialized() || acquire_floor || keyboard_recenter || !changes.empty()) {
+        const bool controller_recenter=motion_controls_.take_recenter(input_clock());
+        const bool manual_recenter=(keyboard_recenter || controller_recenter) && head_tracked;
+        if ((keyboard_recenter || controller_recenter) && !head_tracked)
+            log("Recenter ignored while head tracking is unavailable; release and press again after tracking returns");
+        if (!recenter_.initialized() || acquire_floor || manual_recenter || !changes.empty()) {
             const bool initial=!recenter_.initialized();
             recenter_.recenter(absolute,!initial && !acquire_floor);
+            comfort_.reset();
             if (acquire_floor) {
                 floor_reference_ready_=true;
                 ++stats_.floor_reference_acquisitions;
@@ -693,7 +706,18 @@ class Runtime {
                 std::to_string(measured_height)+"; view_state_flags="+std::to_string(flags));
             floor_wait_logged_=true;
         }
-        for (unsigned eye=0;eye<2;++eye) tracked_[eye]=recenter_.relative(absolute[eye]);
+        const auto motion=motion_controls_.sample(input_clock());
+        const auto qa=absolute[0].orientation,qb=absolute[1].orientation;
+        const float qsign=qa.x*qb.x+qa.y*qb.y+qa.z*qb.z+qa.w*qb.w<0?-1.f:1.f;
+        const auto head=recenter_.relative({scale(add(absolute[0].position,absolute[1].position),.5f),
+            bone_normalize({qa.x+qsign*qb.x,qa.y+qsign*qb.y,qa.z+qsign*qb.z,qa.w+qsign*qb.w})});
+        const bool gameplay=!present_panel_ && !native_interactive_menu_.load(std::memory_order_acquire);
+        comfort_.update(config_.comfort,motion,head,gameplay && head_tracked,input_clock());
+        motion_controls_.movement_yaw(!head_tracked &&
+            config_.comfort.movement_reference==MovementReference::head?std::optional<float>{}:
+            comfort_.movement_yaw(config_.comfort,motion,recenter_,head),gameplay);
+        vignette_strength_=OutlastComfort::vignette(config_.comfort,motion,gameplay);
+        for (unsigned eye=0;eye<2;++eye) tracked_[eye]=relative_pose(absolute[eye]);
         if (xr().floor_known() && !floor_reference_ready_) {
             const float center_y=(tracked_[0].position.y+tracked_[1].position.y)*.5f;
             for (auto& eye:tracked_) eye.position.y-=center_y;
@@ -710,8 +734,8 @@ class Runtime {
         ui_eyes_=menu_overlay_?panel_anchor_.locate_ui(tracked_,fovs_,float(width_)/height_):
             headlocked_ui_constants(tracked_,fovs_,float(width_)/height_);
         if (!test_ && !config_.physical_camcorder)
-            night_vision_enabled_=night_vision_.update(xr().motion_frame(),
-                !present_panel_ && !menu_overlay_,input_clock());
+            night_vision_enabled_=night_vision_.update(motion,
+                !present_panel_ && !menu_overlay_,input_clock(),config_.comfort.primary_hand());
         return true;
     }
     void publish_body(TrackingFrame& tracking,const OutlastLocomotionView& view) {
@@ -719,7 +743,7 @@ class Runtime {
         std::lock_guard<std::mutex> lock(skeleton_mutex_);
         const auto& native=view.native;
         native_use_context_={input_clock(),native.basic,native.special};
-        if (xr().floor_known() && !floor_reference_ready_) {
+        if (xr().floor_known() && !floor_reference_ready_ && !config_.comfort.seated) {
             motion_controls_.physical_stance(false,0,native.pawn_crouched,native.special!=0,input_clock());
             body_frame_.reset();
             return;
@@ -741,7 +765,9 @@ class Runtime {
             native.lean_intent==0 && native.lean_observed &&
             std::abs(native.lean_weight)<=8*std::numeric_limits<float>::epsilon();
         const bool eligible=normal && frame.focused;
-        const bool physical=motion_controls_.physical_stance(eligible && !airborne,targets.head.position.y,
+        const bool stance_gameplay=!present_panel_ && !native_interactive_menu_.load(std::memory_order_acquire);
+        const bool physical=motion_controls_.physical_stance(eligible && stance_gameplay && !airborne &&
+            !config_.comfort.seated,targets.head.position.y,
             native.pawn_crouched,native.special!=0,input_clock());
         if (motion_controls_.take_stance_warning())
             log("Native physical crouch request was not accepted after two bounded attempts; retries suspended until height changes");
@@ -750,7 +776,7 @@ class Runtime {
             standing_camera_hero_=native.hero;
             standing_camera_height_=tracking.origin.z-native.root.z;
         }
-        if (xr().floor_known() && floor_reference_ready_ && standing_camera_hero_==native.hero) {
+        if (!config_.comfort.seated && xr().floor_known() && floor_reference_ready_ && standing_camera_hero_==native.hero) {
             targets.standing_height_delta=recenter_.standing_height()-
                 standing_camera_height_/tracking.units_per_meter;
             tracking.origin.z=native.root.z+outlast_floor_eye_height(tracking.origin.z-native.root.z,
@@ -768,7 +794,7 @@ class Runtime {
             targets.tracked[hand]=frame.hands[hand].grip_tracked;
             if (!targets.tracked[hand]) continue;
             const auto& pose=frame.hands[hand].grip;
-            targets.controllers[hand]=recenter_.relative({{pose.position.x,pose.position.y,pose.position.z},
+            targets.controllers[hand]=relative_pose({{pose.position.x,pose.position.y,pose.position.z},
                 {pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w}});
             targets.hands[hand]=outlast_aligned_hand(targets.controllers[hand],hand_wristward_m_);
         }
@@ -779,7 +805,7 @@ class Runtime {
                 {p.position.x,p.position.y,p.position.z}};
             if (frame.hands[hand].aim_tracked) {
                 const auto& raw=frame.hands[hand].aim;
-                const auto aim=recenter_.relative({{raw.position.x,raw.position.y,raw.position.z},
+                const auto aim=relative_pose({{raw.position.x,raw.position.y,raw.position.z},
                     {raw.orientation.x,raw.orientation.y,raw.orientation.z,raw.orientation.w}});
                 relative_motion.hands[hand].aim={{aim.orientation.x,aim.orientation.y,aim.orientation.z,aim.orientation.w},
                     {aim.position.x,aim.position.y,aim.position.z}};
@@ -814,12 +840,12 @@ class Runtime {
         }
         const auto current=motion_controls_.sample(now);
         if (!request || request->native.hero!=reinterpret_cast<std::uintptr_t>(hero) ||
-            !current.focused || !current.hands[1].aim_tracked ||
+            !current.focused || !current.hands[config_.comfort.primary_hand()].aim_tracked ||
             native_interactive_menu_.load(std::memory_order_acquire) ||
             menu_state_() || field<BYTE>(hero,0x7bc)!=0 || field<BYTE>(hero,0x7bd)!=0)
             return {};
         return outlast_controller_use_ray(native_body_tracking(hero,*request),request->motion,
-            request->clock,now,true);
+            request->clock,now,true,config_.comfort.primary_hand());
     }
     UINT64 evaluate_native_use(NativeUseEntry original,const char* kind,void* hero,INT action) {
         const auto now=input_clock();
@@ -1628,6 +1654,7 @@ class Runtime {
         const bool tracking=located && !state.panel;
         auto tracking_frame=tracking?
             outlast_upright_tracking(decoded->camera.tracking,world_up_):decoded->camera.tracking;
+        if (tracking) tracking_frame.units_per_meter/=config_.comfort.world_scale;
         std::optional<OutlastLocomotionView> locomotion;
         if (tracking) {
             std::lock_guard<std::mutex> lock(camera_pose_mutex_);
@@ -1908,20 +1935,17 @@ class Runtime {
         const auto motion=motion_controls_.sample(input_clock());
         std::optional<WorldPanelHit> hit;
         std::optional<EyePose> aim;
-        if (panel && motion.focused && panel_anchor_.placed()) {
-            for (const unsigned hand:{menu_pointer_hand_,1-menu_pointer_hand_}) {
-                if (menu_pointer_down_ && hand!=menu_pointer_hand_) continue;
-                const auto& value=motion.hands[hand];
-                if (!value.aim_tracked) continue;
+        const bool enabled=panel && motion.focused && panel_anchor_.placed();
+        menu_pointer_hand_=menu_press_.select_hand(enabled,menu_pointer_hand_,
+            {motion.hands[0].aim_tracked,motion.hands[1].aim_tracked},
+            {motion.hands[0].trigger,motion.hands[1].trigger});
+        if (enabled) {
+            const auto& value=motion.hands[menu_pointer_hand_];
+            if (value.aim_tracked) {
                 const auto& p=value.aim;
-                const auto candidate=recenter_.relative({{p.position.x,p.position.y,p.position.z},
+                aim=relative_pose({{p.position.x,p.position.y,p.position.z},
                     {p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}});
-                const auto intersection=panel_anchor_.intersect(candidate);
-                if (!aim || (!menu_pointer_down_ && intersection)) {
-                    aim=candidate;hit=intersection;
-                    menu_pointer_hand_=hand;
-                }
-                if (hit || menu_pointer_down_) break;
+                hit=panel_anchor_.intersect(*aim);
             }
         }
         const bool down=menu_press_.update(aim.has_value(),hit.has_value(),menu_pointer_hand_,
@@ -2051,7 +2075,7 @@ class Runtime {
                 // Native use animations still own held/released actions. Only the
                 // temporary targeting override requires idle locomotion.
                 const bool body_ready=body && clock>=body->clock && clock-body->clock<=250000 &&
-                    body->motion.hands[1].aim_tracked;
+                    body->motion.hands[r.config_.comfort.primary_hand()].aim_tracked;
                 use_ready=outlast_native_use_action_ready(body_ready,r.native_use_context_,clock);
             }
             const auto status=r.motion_controls_.state(index,output,result,physical,clock,menu_pointer,use_ready,
@@ -2251,9 +2275,6 @@ class Runtime {
             if (owned) {
                 std::lock_guard<std::mutex> lock(r.skeleton_mutex_);
                 restored=r.body_ik_.restore(component);
-                if (r.body_generation_!=r.calibrated_generation_) {
-                    r.body_ik_.reset();r.calibrated_generation_=r.body_generation_;
-                }
             }
             r.original_skeleton_evaluate_(component,flags,secondary);
             if (r.camcorder_mesh_ && r.camcorder_mesh_->owns(owner,component)) {
@@ -2263,6 +2284,10 @@ class Runtime {
             }
             if (!owned || !field<void*>(component,0x238)) return;
             std::unique_lock<std::mutex> lock(r.skeleton_mutex_);
+            // Recenter can publish a new generation during native evaluation.
+            if (r.body_generation_!=r.calibrated_generation_) {
+                r.body_ik_.reset();r.calibrated_generation_=r.body_generation_;
+            }
             const auto now=r.input_clock();
             const bool retain=r.probe_skeleton_.is_open() &&
                 (r.probe_skeleton_all_ || r.skeleton_observations_<60 || (r.skeleton_observations_+1)%30==0);
@@ -2274,10 +2299,13 @@ class Runtime {
             const bool body_current=r.body_frame_ &&
                 r.body_frame_->native.hero==reinterpret_cast<std::uintptr_t>(owner) &&
                 now>=r.body_frame_->clock && now-r.body_frame_->clock<=250000;
-            const bool motion_focused=body_current && r.motion_controls_.sample(now).focused;
+            const auto motion=r.motion_controls_.sample(now);
+            const bool motion_focused=body_current && motion.focused;
             if (motion_focused) {
                 const auto basic=field<BYTE>(owner,0x7bc),special=field<BYTE>(owner,0x7bd);
                 auto targets=r.body_frame_->targets;
+                for (unsigned hand=0;hand<2;++hand)
+                    targets.tracked[hand]=targets.tracked[hand] && motion.hands[hand].grip_tracked;
                 if (outlast_tracked_locomotion(basic,special) &&
                     (special==0 || (special<=2 && targets.compensate_native_crouch) ||
                      outlast_airborne_locomotion(basic,special))) {
@@ -2798,10 +2826,6 @@ class Runtime {
         GraphicsScope graphics(*this);
         RenderState state{renderer,ownership_.owns_render(renderer),ownership_.world_panel(renderer),{},nullptr};
         if (state.main) {
-            if (present_panel_!=state.panel) {
-                panel_anchor_.reset();
-                log(state.panel?"Native main menu: world-anchored flat panel":"Native gameplay: tracked single-pass world");
-            }
             present_panel_=state.panel;
         }
         const auto previous=render_;render_=&state;
@@ -2989,6 +3013,32 @@ class Runtime {
     }
     static void WINAPI normal(void* renderer) {guarded([&] {auto& r=self();r.render(renderer,r.original_.normal);});}
     static void WINAPI alternate(void* renderer) {guarded([&] {auto& r=self();r.render(renderer,r.original_.alternate);});}
+    static INT WINAPI translucency_bounds(void* renderer,UINT depth_group,RECT* bounds) {
+        return guarded([&] {
+            auto& r=self();
+            if (!render_ || !render_->main || render_->panel || render_->renderer!=renderer ||
+                render_->views.empty())
+                return r.original_.translucency_bounds(renderer,depth_group,bounds);
+            if (!bounds) throw std::invalid_argument("Native translucency bounds output cannot be null");
+            RECT full{LONG_MAX,LONG_MAX,0,0};
+            for (const auto& view:render_->views) {
+                const auto viewport=field<std::array<INT,4>>(view->view,0x6c);
+                if (viewport[0]<0 || viewport[1]<0 || viewport[2]<0 || viewport[3]<0 ||
+                    viewport[0]>LONG_MAX-viewport[2] || viewport[1]>LONG_MAX-viewport[3])
+                    throw std::invalid_argument("Invalid native translucency viewport");
+                if (!viewport[2] || !viewport[3]) continue;
+                full.left=std::min(full.left,LONG(viewport[0]));
+                full.top=std::min(full.top,LONG(viewport[1]));
+                full.right=std::max(full.right,LONG(viewport[0]+viewport[2]));
+                full.bottom=std::max(full.bottom,LONG(viewport[1]+viewport[3]));
+            }
+            if (full.left>=full.right || full.top>=full.bottom)
+                return r.original_.translucency_bounds(renderer,depth_group,bounds);
+            // Mono-projected glass bounds can be empty or stale after a tracked head turn.
+            *bounds=full;
+            return INT(1);
+        });
+    }
     static void WINAPI view(void* rhi,const void* native_view) {
         guarded([&] {auto& r=self();
             if (render_) {
@@ -3347,8 +3397,31 @@ class Runtime {
             gpu_check(restore.apply(),"Restore native clear state");return status;});
     }
     static RECT rect(const RECT* input,UINT w,UINT h) {return input?*input:RECT{0,0,LONG(w),LONG(h)};}
+    static HRESULT WINAPI update_surface(IDirect3DDevice9* d,IDirect3DSurface9* src,const RECT* source,
+        IDirect3DSurface9* dst,const POINT* dest) {
+        return guarded([&] {auto& r=self();GraphicsScope graphics(r);OutlastAtlasTag a{},b{};
+            if (!src || !dst) return HRESULT(D3DERR_INVALIDCALL);
+            if (internal_depth || !atlas_tag(*dst,b))
+                return r.original<UpdateSurface>(d,30)(d,src,source,dst,dest);
+            Internal internal;
+            const bool sa=atlas_tag(*src,a);
+            D3DSURFACE_DESC sd{};gpu_check(src->GetDesc(&sd),"Read native surface-upload source");
+            auto s=rect(source,sa?a.logical_width:sd.Width,sd.Height);
+            POINT t=dest?*dest:POINT{};
+            const bool full=!sa && dst==r.final_surface_.get() && !t.x && !t.y &&
+                s.right-s.left==LONG(b.logical_width) && s.bottom-s.top==LONG(b.logical_height);
+            const auto first=r.original<UpdateSurface>(d,30)(d,src,&s,dst,&t);
+            if (FAILED(first)) return first;
+            if (sa) {s.left+=LONG(a.logical_width);s.right+=LONG(a.logical_width);}
+            t.x+=LONG(b.logical_width);
+            const auto result=r.original<UpdateSurface>(d,30)(d,src,&s,dst,&t);
+            if (SUCCEEDED(result) && full) r.present_panel_=true;
+            return result;
+        });
+    }
     static HRESULT WINAPI stretch(IDirect3DDevice9* d,IDirect3DSurface9* src,const RECT* source,IDirect3DSurface9* dst,const RECT* dest,D3DTEXTUREFILTERTYPE filter) {
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);
+            if (!src || !dst) return HRESULT(D3DERR_INVALIDCALL);
             if (internal_depth) return r.original<Stretch>(d,34)(d,src,source,dst,dest,filter);
             Internal internal;OutlastAtlasTag a{},b{};
             const bool sa=src && atlas_tag(*src,a),da=dst && atlas_tag(*dst,b);
@@ -3362,6 +3435,8 @@ class Runtime {
             }
             D3DSURFACE_DESC sd{},dd{};gpu_check(src->GetDesc(&sd),"Read native blit source");gpu_check(dst->GetDesc(&dd),"Read native blit destination");
             RECT s=rect(source,sa?a.logical_width:sd.Width,sd.Height),t=rect(dest,da?b.logical_width:dd.Width,dd.Height);
+            const bool full=!sa && da && dst==r.final_surface_.get() && !t.left && !t.top &&
+                t.right==LONG(b.logical_width) && t.bottom==LONG(b.logical_height);
             const auto first=r.original<Stretch>(d,34)(d,src,&s,dst,&t,filter);
             if (FAILED(first) || !da) {
                 auto* capture=r.camcorder_probe_?r.camcorder_probe_.get():r.camcorder_capture_.get();
@@ -3370,7 +3445,9 @@ class Runtime {
             }
             if (sa) {s.left+=LONG(a.logical_width);s.right+=LONG(a.logical_width);}
             t.left+=LONG(b.logical_width);t.right+=LONG(b.logical_width);
-            return r.original<Stretch>(d,34)(d,src,&s,dst,&t,filter);});
+            const auto result=r.original<Stretch>(d,34)(d,src,&s,dst,&t,filter);
+            if (SUCCEEDED(result) && full) r.present_panel_=true;
+            return result;});
     }
     static HRESULT WINAPI fill(IDirect3DDevice9* d,IDirect3DSurface9* dst,const RECT* rectangle,D3DCOLOR color) {
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);OutlastAtlasTag tag{};
@@ -3584,11 +3661,18 @@ class Runtime {
             }
             if (!r.frame_open_) r.begin_frame();
             if (r.frame_open_) {
+                if (r.present_panel_!=r.last_present_panel_) {
+                    if (r.present_panel_) r.panel_anchor_.reset();
+                    log(r.present_panel_?"Native flat content: world-anchored two-eye panel":
+                        "Native gameplay: tracked single-pass world");
+                    r.last_present_panel_=r.present_panel_;
+                }
                 r.compose_camcorder();
-                if (!r.present_panel_ && !r.menu_overlay_ && r.night_vision_enabled_) {
+                if (!r.present_panel_ && !r.menu_overlay_ &&
+                    (r.night_vision_enabled_ || r.vignette_strength_>0)) {
                     if (!r.night_vision_filter_)
                         r.night_vision_filter_=std::make_unique<D3D9NightVision>(*d);
-                    r.night_vision_filter_->draw(*r.final_surface_.get());
+                    r.night_vision_filter_->draw(*r.final_surface_.get(),r.night_vision_enabled_,r.vignette_strength_);
                 }
                 const bool direct=!r.present_panel_ && r.width_==r.xr().width() && r.height_==r.xr().height();
                 if (!direct && !r.submission_.get()) {
@@ -3683,7 +3767,7 @@ class Runtime {
         BIND(main_viewport);BIND(enqueue);BIND(constructor);BIND(dispatch);
         BIND(normal);BIND(alternate);BIND(view);BIND(indexed);BIND(sphere);
         BIND(box);BIND(box_inside);BIND(sphere_inside);BIND(texture);BIND(surface);
-        BIND(batched);BIND(crosshair_update);
+        BIND(batched);BIND(crosshair_update);BIND(translucency_bounds);
         BIND(ui);
 #undef BIND
         if (!bindings.camera_base || !bindings.camera_update || !bindings.lean_tick || !bindings.hero_cast)
@@ -3792,14 +3876,18 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=8 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=10 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
+            config_.comfort=test->comfort;
+            motion_controls_.configure(config_.comfort);
             test_xr_=std::make_unique<OpenXRStereoSession>(test->xr_resolve);
         } else {
             OutlastNativeImage image(module_path(nullptr));
             const auto mod_directory=module_path(own_module).parent_path();
             config_=load_outlast_config(mod_directory);
+            motion_controls_.configure(config_.comfort);
+            menu_pointer_hand_=config_.comfort.primary_hand();
             wchar_t mode[8]{};
             const auto length=GetEnvironmentVariableW(L"OLVR_HEADLESS_PROBE",mode,UINT(std::size(mode)));
             if (length && (length!=1 || mode[0]!=L'1'))
@@ -4009,6 +4097,7 @@ public:
                 b.crosshair_update=retail_entry<CrosshairUpdateEntry>(image,0xd1d260);
                 b.box=retail_entry<BoxEntry>(image,0x148340);
                 b.box_inside=retail_entry<BoxInsideEntry>(image,0x148600);
+                b.translucency_bounds=retail_entry<TranslucencyBoundsEntry>(image,0x8aaba0);
                 wchar_t position_fixture[2]{};
                 if (headless_probe && GetEnvironmentVariableW(L"OLVR_PROBE_WINDOW_POSITION",position_fixture,2)==1 &&
                     position_fixture[0]==L'1') {

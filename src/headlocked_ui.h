@@ -3,17 +3,21 @@
 #include "stereo_reconstruction.h"
 
 namespace olvr {
-inline StereoViewConstants headlocked_ui_constants(const std::array<EyePose,2>& eyes,
-    const std::array<EyeFov,2>& fovs,float aspect,float distance=2.f) {
-    if (!std::isfinite(aspect) || aspect<=0 || !std::isfinite(distance) || distance<=.01f)
-        throw std::invalid_argument("Invalid headlocked UI plane");
+inline Quaternion binocular_orientation(const std::array<EyePose,2>& eyes) {
     const auto a=eyes[0].orientation,b=eyes[1].orientation;
     const float sign=a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w<0?-1.f:1.f;
     Quaternion orientation{a.x+sign*b.x,a.y+sign*b.y,a.z+sign*b.z,a.w+sign*b.w};
     const float norm=std::sqrt(orientation.x*orientation.x+orientation.y*orientation.y+
         orientation.z*orientation.z+orientation.w*orientation.w);
     if (!std::isfinite(norm) || norm<.000001f) throw std::invalid_argument("Invalid UI head orientation");
-    orientation={orientation.x/norm,orientation.y/norm,orientation.z/norm,orientation.w/norm};
+    return {orientation.x/norm,orientation.y/norm,orientation.z/norm,orientation.w/norm};
+}
+
+inline StereoViewConstants headlocked_ui_constants(const std::array<EyePose,2>& eyes,
+    const std::array<EyeFov,2>& fovs,float aspect,float distance=2.f) {
+    if (!std::isfinite(aspect) || aspect<=0 || !std::isfinite(distance) || distance<=.01f)
+        throw std::invalid_argument("Invalid headlocked UI plane");
+    const auto orientation=binocular_orientation(eyes);
     const auto right=rotate(orientation,{1,0,0}),up=rotate(orientation,{0,1,0});
     const auto center=add(scale(add(eyes[0].position,eyes[1].position),.5f),
         scale(rotate(orientation,{0,0,-1}),distance));
