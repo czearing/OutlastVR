@@ -20,7 +20,7 @@ foreach(name IN ITEMS
     test_headlocked_ui test_world_scissor test_outlast_native_view)
     olvr_test(${name})
 endforeach()
-foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery)
+foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery snap-recovery)
     string(REPLACE "-" "_" test_mode "${mode}")
     add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})
     set_tests_properties(test_input_${test_mode} PROPERTIES LABELS "cpu" TIMEOUT 120)
@@ -83,6 +83,9 @@ if(OLVR_GPU_TESTS)
         add_test(NAME test_integrated_snap COMMAND test_integrated_mod
             "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --snap)
         set_tests_properties(test_integrated_snap PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME test_integrated_snap_recovery COMMAND test_integrated_mod
+            "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --snap-recovery)
+        set_tests_properties(test_integrated_snap_recovery PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
         add_test(NAME test_integrated_ipd_cycle COMMAND test_integrated_mod
             "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --ipd-cycle)
         set_tests_properties(test_integrated_ipd_cycle PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)

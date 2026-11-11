@@ -17,6 +17,7 @@ struct MotionFrame {
     XrTime time=0;
     bool focused=false,menu=false;
     XrVector2f move{},turn{};
+    bool move_active=false,turn_active=false;
     std::array<MotionHand,2> hands{};
 };
 
@@ -102,11 +103,12 @@ class OpenXRMotionInput {
         else if (!down) blocked=false;
         return down && !blocked;
     }
-    XrVector2f stick(XrAction action,unsigned hand) const {
+    XrVector2f stick(XrAction action,unsigned hand,bool& available) const {
         const auto info=query(action,hand);
         XrActionStateVector2f state{};state.type=XR_TYPE_ACTION_STATE_VECTOR2F;
         xr_check(GetActionStateVector2f_(session_,&info,&state),"Read controller stick");
-        if (!state.isActive) return {};
+        available=state.isActive!=XR_FALSE;
+        if (!available) return {};
         if (!std::isfinite(state.currentState.x) || !std::isfinite(state.currentState.y) ||
             std::abs(state.currentState.x)>1 || std::abs(state.currentState.y)>1)
             throw std::runtime_error("Invalid active controller stick value");
@@ -245,7 +247,8 @@ public:
             suspend();return frame;
         }
         xr_check(result,"Synchronize motion controls");
-        frame.focused=true;frame.move=stick(move_,0);frame.turn=stick(turn_,1);
+        frame.focused=true;
+        frame.move=stick(move_,0,frame.move_active);frame.turn=stick(turn_,1,frame.turn_active);
         bool menu_available=false;
         const bool raw_menu=button(menu_,0,&menu_available);
         frame.menu=rearmed_button(raw_menu,menu_available,menu_blocked_);

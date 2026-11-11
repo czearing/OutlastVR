@@ -516,7 +516,7 @@ int main(int argc,char** argv) {
             mode=="--comfort-fault-turn" || mode=="--snap" || mode=="--fault-snap" ||
             mode=="--flat-transitions" || mode=="--flat-upload" || mode=="--fault-flat-mono" ||
             mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery" ||
-            mode=="--reset-retry" || mode=="--flat-wrap")),
+            mode=="--reset-retry" || mode=="--flat-wrap" || mode=="--snap-recovery")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
@@ -548,7 +548,8 @@ int main(int argc,char** argv) {
         const auto error=exported<LastError>(dll,"OutlastVR_LastError");
         shutdown=exported<Shutdown>(dll,"OutlastVR_Shutdown");
         RuntimeTestConfiguration config{};
-        const bool snap_mode=mode=="--snap" || mode=="--fault-snap";
+        const bool snap_recovery=mode=="--snap-recovery";
+        const bool snap_mode=mode=="--snap" || mode=="--fault-snap" || snap_recovery;
         if (snap_mode) {
             config.comfort.snap_turn_degrees=mode=="--fault-snap"?0.f:15.f;
             mock.snap_test=true;
@@ -671,6 +672,10 @@ int main(int argc,char** argv) {
             const bool flat_only=mock.flat_test && f%5==1;
             mock.flat_after_world=mock.flat_frame && !flat_only;
             if (snap_mode) motion_mock::fake.fixture_turn.x=f==1?1.f:0.f;
+            if (snap_recovery) {
+                motion_mock::fake.axis_active[1]=f!=6;
+                if (f==6 || f==7) motion_mock::fake.fixture_turn.x=1;
+            }
             motion_mock::fake.fixture_crouch=!comfort_mode && f!=6 && f!=12;
             motion_mock::fake.fixture_reload=comfort_mode && f!=6 && f!=12;
             if (!input_chords) {
@@ -953,6 +958,9 @@ int main(int argc,char** argv) {
         if (input_recovery)
             std::cout<<"PASS: actual_dll_digital_recovery; held_primary_secondary_and_menu_suppressed; "
                 "fresh_press_after_release; focus_and_render_suspension; native_polls=20\n";
+        if (snap_recovery)
+            std::cout<<"PASS: actual_dll_snap_action_recovery; inactive_axis_does_not_rearm; "
+                "held_deflection_suppressed; independent_move_and_buttons_preserved\n";
         if (reset_retry)
             std::cout<<"PASS: rejected_reset_preserves_native_error; native_device_not_reset; "
                 "successful_retry_rebuilds_stereo\n";

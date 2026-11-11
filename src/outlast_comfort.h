@@ -21,7 +21,8 @@ public:
     void update(const OutlastComfortSettings& options,const MotionFrame& motion,
                 EyePose head,bool gameplay,UINT64 now) {
         head_y_=options.seated?head.position.y:0;
-        const bool current=motion.focused && (!clock_ || (now>=clock_ && now-clock_<=250000));
+        const bool turn_active=options.left_handed?motion.move_active:motion.turn_active;
+        const bool current=motion.focused && turn_active && (!clock_ || (now>=clock_ && now-clock_<=250000));
         clock_=now;
         if (!current || !gameplay) {armed_=false;return;}
         const float turn=options.left_handed?motion.move.x:motion.turn.x;

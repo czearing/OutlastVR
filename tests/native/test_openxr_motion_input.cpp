@@ -1,5 +1,6 @@
 #define XR_NO_PROTOTYPES
 #include "openxr_motion_input.h"
+#include "outlast_comfort.h"
 #include <iostream>
 #include <map>
 
@@ -30,6 +31,7 @@ struct Fake {
     std::array<bool,2> vibrating{};
     bool focused=true,active=true,lost_left=false,bad_pose=false,bad_axis=false,partial_failure=false;
     std::array<bool,2> hand_active{{true,true}};
+    std::array<bool,2> axis_active{{true,true}};
     bool stale_fault=false,swap_fault=false,all_unsupported=false;
     std::string supported_profile;
     unsigned accepted_profiles=0;
@@ -156,7 +158,7 @@ XrResult XRAPI_CALL vector_state(XrSession,const XrActionStateGetInfo* info,XrAc
     query(info,XR_ACTION_TYPE_VECTOR2F_INPUT);
     const bool move=fake.actions.at(info->action).first=="move";
     expect(fake.left(info->subactionPath)==move,"Move and turn sticks switched hands");
-    out->isActive=fake.active_hand(info->subactionPath);
+    out->isActive=fake.active_hand(info->subactionPath) && fake.axis_active[move?0:1];
     out->currentState={move?.3f:-.4f,fake.bad_axis?1.5f:.6f};
     if (fake.neutral_controls) out->currentState=move?fake.fixture_move:fake.fixture_turn;
     return XR_SUCCESS;
@@ -233,12 +235,90 @@ int main(int argc,char** argv) {
         const bool pause_test=mode=="--pause-chord";
         const bool sector_test=mode=="--fallback-gestures";
         const bool recovery_test=mode=="--button-recovery";
+        const bool snap_recovery=mode=="--snap-recovery";
         if (argc==2) {
             fake.stale_fault=std::strcmp(argv[1],"--fault-stale")==0;
             fake.swap_fault=std::strcmp(argv[1],"--fault-hands")==0;
-            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test || recovery_test,
+            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test || recovery_test || snap_recovery,
                 "Unknown motion control");
         } else expect(argc==1,"Invalid motion test arguments");
+        if (snap_recovery) {
+            unsigned scenarios=0;
+            for (const bool left_handed:{false,true}) for (const bool whole_hand:{false,true})
+            for (const bool held_before:{false,true}) {
+                fake=Fake{};fake.neutral_controls=true;
+                const unsigned hand=left_handed?0:1;
+                auto& axis=hand?fake.fixture_turn:fake.fixture_move;
+                (hand?fake.fixture_move:fake.fixture_turn)={.3f,.6f};
+                {
+                    OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                    OutlastComfort comfort;
+                    OutlastComfortSettings options;
+                    options.left_handed=left_handed;options.snap_turn_degrees=30;
+                    const EyePose head{{.4f,.1f,.2f},{0,0,0,1}};
+                    auto sample=[&](XrTime time) {
+                        const auto frame=input.sample(fake.base,time);
+                        comfort.update(options,frame,head,true,UINT64(time));
+                        return frame;
+                    };
+                    auto heading=[&](unsigned snaps,const char* message) {
+                        const float angle=snaps*.5235987756f;
+                        const auto forward=rotate(comfort.pose(head).orientation,{0,0,-1});
+                        const auto delta=add(forward,scale(Vec3{std::sin(angle),0,-std::cos(angle)},-1));
+                        expect(dot(delta,delta)<.000001f,message);
+                    };
+                    sample(1000);
+                    axis.x=held_before?1.f:0.f;sample(2000);
+                    heading(held_before?1:0,"Initial active snap turn was lost");
+                    (whole_hand?fake.hand_active:fake.axis_active)[hand]=false;
+                    const auto unavailable=sample(3000);
+                    const auto own=hand?unavailable.turn:unavailable.move;
+                    const auto other=hand?unavailable.move:unavailable.turn;
+                    expect(own.x==0 && own.y==0 && other.x==.3f && other.y==.6f,
+                        "One inactive stick disabled the independent controller");
+                    expect(!(hand?unavailable.turn_active:unavailable.move_active) &&
+                        (hand?unavailable.move_active:unavailable.turn_active),
+                        "A synthetic neutral axis was reported as active or lost its hand identity");
+                    (whole_hand?fake.hand_active:fake.axis_active)[hand]=true;
+                    axis.x=1;
+                    for (const XrTime time:{4000,4100}) {
+                        const auto restored=sample(time);
+                        expect((hand?restored.turn:restored.move).x==1,
+                            "Snap rearming suppressed ordinary analog input");
+                        heading(held_before?1:0,"Inactive stick generated a phantom snap on recovery");
+                    }
+                    axis.x=0;sample(5000);
+                    axis.x=1;sample(6000);
+                    heading(held_before?2:1,"An active neutral and fresh deflection did not recover snap turning");
+                }
+                expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                    "Snap-recovery test leaked controller resources");
+                ++scenarios;
+            }
+            for (const bool left_handed:{false,true}) {
+                fake=Fake{};fake.neutral_controls=true;
+                const unsigned hand=left_handed?0:1;
+                fake.axis_active[1-hand]=false;
+                fake.lost_left=left_handed;
+                {
+                    OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                    OutlastComfort comfort;
+                    OutlastComfortSettings options;
+                    options.left_handed=left_handed;options.snap_turn_degrees=30;
+                    const EyePose head{{0,0,0},{0,0,0,1}};
+                    comfort.update(options,input.sample(fake.base,1000),head,true,1000);
+                    (hand?fake.fixture_turn:fake.fixture_move).x=1;
+                    comfort.update(options,input.sample(fake.base,2000),head,true,2000);
+                    const auto forward=rotate(comfort.pose(head).orientation,{0,0,-1});
+                    expect(std::abs(forward.x-.5f)<.00001f && std::abs(forward.z+.8660254f)<.00001f,
+                        "Unrelated stick inactivity or optical pose loss disabled active snap turning");
+                }
+            }
+            std::cout<<"PASS: snap_action_recovery_scenarios="<<scenarios
+                <<"; both_handedness; action_and_controller_activity; held_and_unseen_deflections; "
+                <<"active_neutral_rearms; ordinary_axes_preserved; independent_hands; optical_loss_preserved\n";
+            return 0;
+        }
         if (recovery_test) {
             enum class Kind {primary,secondary,menu,click};
             struct Case {const char* name;unsigned hand;bool Fake::*pressed;Kind kind;float sector;};

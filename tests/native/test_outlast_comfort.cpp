@@ -21,7 +21,7 @@ int main(int argc,char** argv) {
             "Unknown comfort control");
         OutlastComfortSettings options;options.snap_turn_degrees=fault=="--fault-snap"?0.f:30.f;
         OutlastComfort comfort;
-        MotionFrame motion{};motion.focused=true;
+        MotionFrame motion{};motion.focused=true;motion.move_active=motion.turn_active=true;
         EyePose head{{.4f,-.2f,.3f},{0,0,0,1}};
         comfort.update(options,motion,head,true,1000);
         motion.turn.x=1;comfort.update(options,motion,head,true,2000);
@@ -215,7 +215,7 @@ int main(int argc,char** argv) {
             OutlastComfort crouched;
             OutlastComfortSettings crouch_options;
             crouch_options.snap_turn_degrees=30;crouch_options.left_handed=left_handed;
-            MotionFrame turn{};turn.focused=true;
+            MotionFrame turn{};turn.focused=true;turn.move_active=turn.turn_active=true;
             EyePose low{{.4f,height-.45f,.3f},
                 multiply({0,std::sin(yaw*.5f),0,std::cos(yaw*.5f)},
                     {std::sin(.2f),0,0,std::cos(.2f)})};
