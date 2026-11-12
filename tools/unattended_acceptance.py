@@ -223,7 +223,8 @@ def main(argv=None):
                 name = mode.removeprefix("--") or "default"
                 run(f"dll-{cycle:04}-{name}", [paths["integrated"], module, retail] + ([mode] if mode else []),
                     ["PASS: integrated production DLL; native_frames=20;", "XR_cleanup_handles=4",
-                     "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;"])
+                     "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;",
+                     "PASS: native_scripted_effects_preserved; modes=3,4,255; production_camera_update_continued"])
         for mode, diagnostic in DLL_REJECTIONS.items():
             run("reject-" + mode.removeprefix("--"), [paths["integrated"], module, retail, mode],
                 ["REJECTED: compositor stereo content or single-draw contract failed", diagnostic,

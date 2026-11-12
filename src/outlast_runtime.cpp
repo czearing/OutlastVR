@@ -226,6 +226,7 @@ class Runtime {
     float vignette_strength_=0;
     OutlastNightVision night_vision_;
     bool night_effects_waiting_=false;
+    std::optional<BYTE> deferred_night_effect_;
     std::unique_ptr<D3D9ComfortFilter> comfort_filter_;
     using CamcorderRaise=UINT64(WINAPI*)(void*);
     using CamcorderLower=void(WINAPI*)(void*);
@@ -1863,7 +1864,7 @@ class Runtime {
         });
     }
     void update_native_night_vision(void* camera) {
-        if (test_ || config_.physical_camcorder || !motion_enabled_) return;
+        if ((test_ && !camcorder_engine_) || config_.physical_camcorder || !motion_enabled_) return;
         const auto thread=input_thread_.load(std::memory_order_acquire);
         if (!thread) return;
         if (thread!=GetCurrentThreadId())
@@ -1889,10 +1890,19 @@ class Runtime {
         }
         night_effects_waiting_=false;
         const auto mode=field<BYTE>(effects,0x3b8);
-        if (mode>2) throw std::runtime_error("Unknown retail camera effect mode");
-        const bool allowed=!menu_state_() && !(field<UINT>(hero,0x2f88)&0x80000);
-        night_vision_.synchronize(mode==2);
-        const bool enabled=night_vision_.update(motion,allowed,now,config_.comfort.primary_hand());
+        const bool allowed=mode<=2 && !menu_state_() && !(field<UINT>(hero,0x2f88)&0x80000);
+        const auto decision=night_vision_.update_native(motion,mode,allowed,now,config_.comfort.primary_hand());
+        if (!decision.has_value()) {
+            if (deferred_night_effect_!=mode)
+                log("Native camera effect owns postprocessing; night vision deferred; mode="+std::to_string(mode));
+            deferred_night_effect_=mode;
+            return;
+        }
+        if (deferred_night_effect_) {
+            log("Native camera effect restored; night vision waits for released input; mode="+std::to_string(mode));
+            deferred_night_effect_.reset();
+        }
+        const bool enabled=*decision;
         if (enabled!=(mode==2)) {
             outlast_native_night_lights({field<void*>(hero,0x2d40),field<void*>(hero,0x2d48),
                 field<void*>(hero,0x2d50)},enabled,enable_camera_component_);
@@ -3913,6 +3923,18 @@ class Runtime {
             return result;});
     }
     void bind_native(const RuntimeBindings& bindings) {
+        if (bindings.night_vision_engine || bindings.menu_state || bindings.night_effect ||
+            bindings.normal_effect || bindings.camera_effect || bindings.night_light) {
+            if (!bindings.night_vision_engine || !bindings.menu_state || !bindings.night_effect ||
+                !bindings.normal_effect || !bindings.camera_effect || !bindings.night_light)
+                throw std::invalid_argument("Native night vision requires complete effect bindings");
+            camcorder_engine_=bindings.night_vision_engine;
+            menu_state_=bindings.menu_state;
+            original_nv_effect_=bindings.night_effect;
+            normal_camera_effect_=bindings.normal_effect;
+            original_camera_effect_=bindings.camera_effect;
+            enable_camera_component_=bindings.night_light;
+        }
 #define BIND(name) if (bindings.name) hooks_->add(bindings.name,&Runtime::name,original_.name)
         BIND(main_viewport);BIND(enqueue);BIND(constructor);BIND(dispatch);
         BIND(normal);BIND(alternate);BIND(view);BIND(indexed);BIND(sphere);
@@ -4031,7 +4053,7 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=11 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=12 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;

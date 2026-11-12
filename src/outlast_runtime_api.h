@@ -3,6 +3,7 @@
 #include "xr_view_constants.h"
 #include "outlast_config.h"
 #include "outlast_skeleton.h"
+#include "outlast_night_vision.h"
 #include <cstdint>
 #include <xinput.h>
 #define XR_USE_PLATFORM_WIN32
@@ -63,11 +64,16 @@ struct RuntimeBindings {
     ViewportFocusEntry viewport_focus=nullptr;
     TranslucencyBoundsEntry translucency_bounds=nullptr;
     SkeletonEvaluateEntry skeleton_evaluate=nullptr;
+    void** night_vision_engine=nullptr;
+    std::uint64_t(WINAPI* menu_state)()=nullptr;
+    OutlastNightEffect night_effect=nullptr;
+    OutlastCameraEffect normal_effect=nullptr,camera_effect=nullptr;
+    OutlastNightLight night_light=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=11;
+    UINT version=12;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};

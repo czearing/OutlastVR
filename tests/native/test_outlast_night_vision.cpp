@@ -15,6 +15,31 @@ int main() {
         motion.hands[1].stick_click=true;
         require(filter.update(motion,true,3000));
         require(filter.update(motion,true,4000));
+        for (const unsigned hand:{0u,1u}) {
+            OutlastNightVision native;
+            MotionFrame tracked{};tracked.focused=true;tracked.hands[hand].grip_tracked=true;
+            UINT64 time=0;
+            const auto update=[&](BYTE mode,bool pressed) {
+                tracked.hands[hand].stick_click=pressed;time+=1000;
+                return native.update_native(tracked,mode,true,time,hand);
+            };
+            require(update(0,false)==false);
+            require(update(0,true)==true);
+            require(!update(3,true).has_value());
+            require(!update(4,false).has_value());
+            require(!update(255,true).has_value());
+            require(update(0,true)==false);
+            require(update(0,false)==false);
+            require(update(0,true)==true);
+            require(!update(3,true).has_value());
+            require(update(2,true)==true);
+            require(update(2,false)==true);
+            require(update(2,true)==false);
+            require(!update(4,true).has_value());
+            require(update(1,true)==false);
+            require(update(1,false)==false);
+            require(update(1,true)==true);
+        }
         motion.hands[1].stick_click=false;filter.update(motion,true,5000);
         motion.hands[1].stick_click=true;
         require(filter.update(motion,false,6000));
@@ -81,6 +106,8 @@ int main() {
         physical.Gamepad.wButtons=XINPUT_GAMEPAD_RIGHT_THUMB;
         controls.state(0,&output,ERROR_SUCCESS,physical,1003,false,true,false);
         require((output.Gamepad.wButtons&XINPUT_GAMEPAD_RIGHT_THUMB)!=0);
-        std::cout<<"PASS: native night/camera/normal effect dispatch; stock-state synchronization; thumbstick focus/tracking/menu isolation\n";
+        std::cout<<"PASS: native night/camera/normal effect dispatch; scripted modes preserved; "
+            <<"held input drained across native mode recovery for both hands; "
+            <<"stock-state synchronization; thumbstick focus/tracking/menu isolation\n";
     } catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

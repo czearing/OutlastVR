@@ -1,6 +1,7 @@
 #pragma once
 #include "openxr_motion_input.h"
 #include <algorithm>
+#include <optional>
 
 namespace olvr {
 
@@ -20,6 +21,16 @@ public:
         if (current && gameplay && !blocked_ && pressed && !down_) enabled_=!enabled_;
         down_=pressed;
         return enabled_;
+    }
+    std::optional<bool> update_native(const MotionFrame& motion,BYTE mode,bool gameplay,
+        UINT64 now,unsigned hand=1) {
+        if (mode>2) {
+            // Retail scripted effects keep ownership; held input must not queue a toggle.
+            update(motion,false,now,hand);
+            return std::nullopt;
+        }
+        synchronize(mode==2);
+        return update(motion,gameplay,now,hand);
     }
 };
 

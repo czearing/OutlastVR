@@ -40,6 +40,13 @@ std::array<unsigned char,0x3300> camera_hero{};
 std::array<unsigned char,0x240> camera_object{};
 std::array<unsigned char,0x100> camera_mesh{};
 std::array<unsigned char,0x150> lean_node{};
+std::array<unsigned char,0xa80> native_engine{};
+std::array<unsigned char,0x450> native_effects{};
+std::array<unsigned char,0xa90> native_controller{};
+void* native_engine_pointer=native_engine.data();
+std::array<UINT,3> native_night_lights{0,0,1};
+std::array<UINT,4> native_effect_calls{};
+DWORD native_effect_thread=0;
 std::array<float,6> camera_base_pose{};
 float native_lean_weight=0;
 std::array<unsigned char,500*4> native_gamepads{};
@@ -173,6 +180,31 @@ NATIVE void* WINAPI hero_cast_stub(void* actor) {
     // Native helper calls may overwrite volatile floating-point argument registers.
     asm volatile("pxor %%xmm1, %%xmm1" ::: "xmm1");
     return actor==camera_hero.data()?actor:nullptr;
+}
+UINT64 WINAPI menu_state_stub() {return 0;}
+void check_native_effect(void* effects) {
+    require(effects==native_effects.data() && GetCurrentThreadId()==native_effect_thread,
+        "Native night vision changed effect ownership or gameplay thread");
+}
+void WINAPI night_effect_stub(void* effects,INT powered) {
+    check_native_effect(effects);
+    require(powered==1,"Default night vision used depleted native postprocessing");
+    write(effects,0x3b8,BYTE(2));++native_effect_calls[0];
+}
+void WINAPI normal_effect_stub(void* effects) {
+    check_native_effect(effects);
+    write(effects,0x3b8,BYTE(0));++native_effect_calls[1];
+}
+void WINAPI camera_effect_stub(void* effects) {
+    check_native_effect(effects);
+    write(effects,0x3b8,BYTE(1));++native_effect_calls[2];
+}
+void WINAPI night_light_stub(void* light,UINT active) {
+    require(GetCurrentThreadId()==native_effect_thread &&
+        std::any_of(native_night_lights.begin(),native_night_lights.end(),
+            [&](const UINT& candidate) {return &candidate==light;}),
+        "Native night vision changed light ownership or gameplay thread");
+    *static_cast<UINT*>(light)=active;++native_effect_calls[3];
 }
 NATIVE int WINAPI sphere_stub(const void*,const float*,const float*) {asm volatile("nop;nop;nop;nop;nop");return 0;}
 NATIVE int WINAPI sphere_inside_stub(const void*,const float*,const float*,int* inside) {asm volatile("nop;nop;nop;nop;nop");*inside=0;return 0;}
@@ -593,6 +625,12 @@ int main(int argc,char** argv) {
         config.bindings.lean_tick=&lean_tick_stub;
         config.bindings.hero_cast=&hero_cast_stub;
         config.bindings.skeleton_evaluate=&skeleton_stub;
+        config.bindings.night_vision_engine=&native_engine_pointer;
+        config.bindings.menu_state=&menu_state_stub;
+        config.bindings.night_effect=&night_effect_stub;
+        config.bindings.normal_effect=&normal_effect_stub;
+        config.bindings.camera_effect=&camera_effect_stub;
+        config.bindings.night_light=&night_light_stub;
         config.bindings.input_tick=&input_tick_stub;
         config.bindings.gamepad_state=&gamepad_state_stub;
         config.bindings.gamepad_vibration=&gamepad_vibration_stub;
@@ -606,6 +644,13 @@ int main(int argc,char** argv) {
         write(camera_object.data(),0x118,UINT(2));
         write(camera_hero.data(),0x360,165.f);
         write(camera_hero.data(),0x444,camera_mesh.data());
+        write(camera_hero.data(),0x2bbc,native_controller.data());
+        write(native_controller.data(),0xa84,UINT(2));
+        write(native_engine.data(),0xa74,native_effects.data());
+        write(native_effects.data(),0x3b4,UINT(0x5a5a1234));
+        for (unsigned light=0;light<native_night_lights.size();++light)
+            write(camera_hero.data(),0x2d40+light*sizeof(void*),&native_night_lights[light]);
+        native_effect_thread=GetCurrentThreadId();
         write(camera_mesh.data(),0x78,camera_hero.data());
         write(lean_node.data(),0x84,camera_mesh.data());
         native_lean_weight=mode=="--fault-camera-bob"?1.f:0.f;
@@ -694,6 +739,8 @@ int main(int argc,char** argv) {
         motion_mock::fake.fixture_turn=comfort_mode?XrVector2f{.3f,.6f}:
             XrVector2f{-.4f,input_chords?0.f:.6f};
         unsigned crouch_edges=0;
+        BYTE resumed_effect_mode=0;
+        unsigned scripted_effect_checks=0;
         Com<IDirect3DTexture9> flat_texture,offscreen_atlas;
         Com<IDirect3DSurface9> upload_source,flat_readback;
         for (unsigned f=0;f<20;++f) {
@@ -748,7 +795,26 @@ int main(int argc,char** argv) {
                 write(view_data.data(),0x3a0,animated.origin);
             }
             lean_tick_stub(lean_node.data(),.015f);
+            const bool scripted_effect=f>=2 && f<=4;
+            if (f==2) resumed_effect_mode=native_effects[0x3b8];
+            if (scripted_effect)
+                native_effects[0x3b8]=f==2?3:f==3?4:255;
+            else if (f==5) native_effects[0x3b8]=resumed_effect_mode;
+            const auto effects_before=native_effects;
+            const auto lights_before=native_night_lights;
+            const auto calls_before=native_effect_calls;
             camera_update_stub(camera_object.data(),.015f);
+            if (scripted_effect) {
+                require(native_effects==effects_before && native_night_lights==lights_before &&
+                    native_effect_calls==calls_before,
+                    "Night vision overwrote a native scripted camera effect or light");
+                ++scripted_effect_checks;
+            } else if (f==5) {
+                require(scripted_effect_checks==3,
+                    "Native camera updates did not survive every scripted effect");
+                std::cout<<"PASS: native_scripted_effects_preserved; modes=3,4,255; "
+                    <<"production_camera_update_continued\n";
+            }
             if (f==10) {
                 flat_texture.reset();
                 offscreen_atlas.reset();
