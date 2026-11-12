@@ -73,12 +73,9 @@ int main() {
             catch (const std::runtime_error&) {missing=true;}
             require(missing,"Admitted pickup without a selected item silently succeeded");
         }
-        for (unsigned basic=0;basic<16;++basic)
-            for (unsigned special=0;special<64;++special) {
-                const bool expected=basic==2 && (special==0x31 || special==0x32);
-                require(outlast_native_use_action_ready(false,{1000,basic,special},1001)==expected,
-                    "Native action continuation enabled an unrelated gameplay state");
-            }
+        for (const unsigned basic:{7u,8u,10u,12u,13u,14u,15u})
+            require(outlast_native_use_action_ready(false,{1000,basic,0},1001),
+                "Native interaction input was disabled after relinquishing tracked-body IK");
         for (const unsigned special:{0x31u,0x32u}) {
             require(outlast_native_use_action_ready(false,{1000,2,special},251000),
                 "Current native pickup/use animation lost its held action");
@@ -88,6 +85,8 @@ int main() {
         }
         require(outlast_native_use_action_ready(true,{},1000000),
             "Fresh body targeting incorrectly depended on an animation context");
+        require(!outlast_native_use_action_ready(false,{},1),
+            "Unobserved native gameplay context enabled an interaction");
         {
             OutlastMotionControls controls;
             MotionFrame frame{};frame.focused=true;frame.hands[1].aim_tracked=true;
@@ -107,13 +106,40 @@ int main() {
             require(!poll(2,49,false,4000),"Native pickup lost its controller release");
             frame.hands[1].squeeze=1;
             require(poll(2,49,false,5000),"Native pickup did not accept a fresh continuation press");
-            require(poll(2,50,false,6000),"Native use-volume animation interrupted its action");
-            require(!poll(2,31,false,7000),"Decimal 31 was mistaken for native special 0x31");
-            require(!poll(2,49,false,8000),"Held input rearmed after an unrelated native state");
+            require(poll(2,50,false,6000),"Native scripted animation interrupted its action");
+            require(poll(7,0,false,7000),"Native door interaction lost its held controller action");
+            require(poll(2,39,false,8000),"Native locker exit lost its held controller action");
             frame.hands[1].squeeze=0;
             require(!poll(0,0,true,9000),"Native interaction return generated a phantom press");
             frame.hands[1].squeeze=1;
             require(poll(0,0,true,10000),"Controller did not recover after native interaction completion");
+        }
+        for (const unsigned hiding:{8u,10u}) {
+            OutlastMotionControls controls;
+            MotionFrame frame{};frame.focused=true;frame.hands[1].aim_tracked=true;
+            XINPUT_STATE output{},physical{};
+            UINT64 now=1000000;
+            auto poll=[&](unsigned basic,unsigned special,bool fresh=true) {
+                now+=1000;
+                controls.publish(frame,now);
+                controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,now+1,false,
+                    outlast_native_use_action_ready(false,{fresh?now:now-251000,basic,special},now+1));
+                return (output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0;
+            };
+            require(!poll(0,0),"Released grip started a hiding interaction");
+            frame.hands[1].squeeze=1;
+            require(poll(2,hiding==8?38:40),"Hiding entrance lost its controller press");
+            require(poll(hiding,0),"Entering a hiding spot interrupted the held grip");
+            frame.hands[1].squeeze=0;
+            require(!poll(hiding,0),"Hiding spot did not receive grip release");
+            frame.hands[1].squeeze=1;
+            require(poll(hiding,0),"Fresh grip could not exit the native hiding state");
+            require(!poll(hiding,0,false),"Stale hiding context retained interaction input");
+            require(!poll(hiding,0),"Fresh context replayed a grip suppressed while stale");
+            frame.hands[1].squeeze=0;
+            require(!poll(hiding,0),"Restoring context manufactured an exit press");
+            frame.hands[1].squeeze=1;
+            require(poll(hiding,0),"Hiding interaction did not rearm after a genuine release");
         }
         TrackingFrame tracking{{100,200,300},{0,1,0},{0,0,1},{-1,0,0},100,{9000,-7000,4000}};
         MotionFrame motion{};

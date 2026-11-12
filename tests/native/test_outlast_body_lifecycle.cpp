@@ -199,7 +199,7 @@ int main(int argc,char** argv) {
     try {
         const std::string mode=argc==2?argv[1]:"";
         require(argc<=2 && (mode.empty() || mode=="--partial-animation" || mode=="--crouch-cycles" ||
-            mode=="--hand-orientation" || mode=="--hidden-bones"),
+            mode=="--hand-orientation" || mode=="--hidden-bones" || mode=="--fault-native-crouch"),
             "Unknown lifecycle test mode");
         if (mode.empty() || mode=="--hand-orientation") hand_orientation();
         if (mode.empty() || mode=="--hidden-bones") {
@@ -264,7 +264,25 @@ int main(int argc,char** argv) {
             f.ik.calibrate(outlast_skeleton(f.component.data()),f.bones,f.targets,f.skin);
             f.solve();
         }
-        if (mode.empty() || mode=="--crouch-cycles") {
+        if (mode.empty() || mode=="--crouch-cycles" || mode=="--fault-native-crouch") {
+            for (const float height:{0.f,80.f,60.f,40.f,20.f,40.f,0.f}) {
+                Fixture manual;
+                manual.targets.native_crouched=height!=0 && mode!="--fault-native-crouch";
+                manual.targets.tracking.origin.z-=height;
+                for (unsigned i=1;i<manual.current.size();++i) {
+                    if (i==16 || i==19) continue;
+                    const float offset=i==15 || i==18?height*.5f:height;
+                    manual.current[i].position.z-=offset;
+                }
+                const auto source=manual.current;
+                const auto solved=manual.solve();
+                require(std::abs(solved.atoms[5].position.z-(170-height))<.03f,
+                    "Native crouch body head diverged from its authored camera height");
+                for (const INT foot:{16,19})
+                    require(distance(solved.atoms[foot].position,source[foot].position)<.03f,
+                        "Native crouch head alignment moved a planted foot");
+                require(equal(solved.atoms[0],source[0]),"Native crouch moved the native root");
+            }
             Fixture f;
             f.targets.compensate_native_crouch=true;
             for (unsigned cycle=0;cycle<6;++cycle) {

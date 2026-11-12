@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0-rc.5",
+  "changes": [
+    "Fixed grip controls stopping when hiding in lockers or under beds.",
+    "Fixed hands getting caught on non-blocking room objects.",
+    "Fixed hand tracking becoming offset while crouching."
+  ],
+  "known_issues": [
+    "Some scripted grabs can feel slightly off-center.",
+    "Physical camcorder controls remain experimental and are off by default.",
+    "VR control hints are currently available in English only."
+  ]
+}

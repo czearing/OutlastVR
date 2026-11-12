@@ -1620,7 +1620,7 @@ class Runtime {
             HandContactDiagnostic diagnostic{};
             result.hands[hand]=hand_collision_.update(hand,anchor,desired,tracking.units_per_meter,
                 [&](NativeHandHit& hit,Vec3 end,Vec3 start,Vec3 extent) {
-                    const bool clear=world_trace_(world,&hit,hero,&end,&start,0x20bf,&extent,nullptr);
+                    const bool clear=outlast_trace_hand_volume(world_trace_,world,hit,hero,end,start,extent);
                     std::lock_guard<std::mutex> contact_log(contact_log_mutex_);
                     if (probe_hand_contacts_.is_open()) {
                         auto& out=probe_hand_contacts_;

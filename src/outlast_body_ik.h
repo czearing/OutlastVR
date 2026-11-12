@@ -474,6 +474,13 @@ public:
                     skeleton.atoms[i].scale=original_[i].scale;
                 }
             }
+            if (targets.native_crouched && !targets.compensate_native_crouch) {
+                // Native crouching lowers the camera even without physical headset movement.
+                const auto up=bone_unit(bone_world_to_component_vector(skeleton,targets.tracking.up));
+                const auto native_offset=add(original_[bones_[5]].position,
+                    scale(standing_[bones_[5]].position,-1));
+                bone_translate(skeleton,bones_[2],scale(up,dot(native_offset,up)),hierarchy);
+            }
             for (const INT hand:{bones_[9],bones_[13]}) {
                 const auto delta=bone_multiply(skeleton.atoms[hand].rotation,
                     bone_inverse(original_[hand].rotation));

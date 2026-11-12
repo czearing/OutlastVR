@@ -18,6 +18,11 @@ static_assert(sizeof(NativeHandHit)==0x68);
 static_assert(offsetof(NativeHandHit,time)==0x28);
 static_assert(offsetof(NativeHandHit,normal)==0x1c);
 using NativeWorldTrace=bool(WINAPI*)(void*,NativeHandHit*,void*,const Vec3*,const Vec3*,UINT,const Vec3*,void*);
+inline bool outlast_trace_hand_volume(NativeWorldTrace trace,void* world,NativeHandHit& hit,
+                                     void* hero,Vec3 end,Vec3 start,Vec3 extent) {
+    // Retail projectile-target queries (0x20) bypass physical blocking (0x40).
+    return trace(world,&hit,hero,&end,&start,0x20df,&extent,nullptr);
+}
 
 struct HandContact {
     Vec3 position{};

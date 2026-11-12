@@ -58,6 +58,42 @@ int main(int argc,char**) {
             require(view && !view->stabilized,"Intentional native camera state was suppressed");
             equal(view->origin,unsupported.bone);
         }
+        for (const auto state:std::array<std::array<unsigned,2>,7>{{
+                {8,0},{10,0},{9,0},{13,0},{2,50},{2,62},{2,67}}}) {
+            OutlastLocomotionCamera scripted;
+            auto source=sample;
+            source.root={100,200,300};source.bone={80,198,468};
+            scripted.complete(source,source.bone);
+            ++source.serial;source.bone.z+=3;
+            scripted.complete(source,source.bone);
+            require(scripted.locate(source.bone)->stabilized,
+                "Scripted handoff regression did not begin with a stabilized camera");
+            for (unsigned frame=0;frame<3;++frame) {
+                ++source.serial;source.basic=state[0];source.special=state[1];
+                source.mode=3;source.root.x+=7;source.bone.z-=15;
+                const auto final=add(source.bone,{5+float(frame),-9,11});
+                scripted.complete(source,final);
+                const auto view=scripted.locate(final);
+                require(view && !view->stabilized && view->source_serial==source.serial,
+                    "Hiding or grabbed camera retained locomotion ownership");
+                equal(view->origin,final);
+                for (const float units:{50.f,100.f,200.f}) {
+                    TrackingFrame tracking{view->origin,{0,1,0},{0,0,1},{-1,0,0},units,{}};
+                    const Vec3 head{.2f,-.15f,-.1f};
+                    const EyeFov fov{-.8f,.8f,.8f,-.8f};
+                    const auto left=eye_constants(tracking,{{head.x-.032f,head.y,head.z},{0,0,0,1}},
+                        fov,2,100000);
+                    const auto right=eye_constants(tracking,{{head.x+.032f,head.y,head.z},{0,0,0,1}},
+                        fov,2,100000);
+                    equal({(left[16]+right[16])*.5f,(left[17]+right[17])*.5f,
+                        (left[18]+right[18])*.5f},add(final,{.1f*units,.2f*units,-.15f*units}));
+                }
+            }
+            ++source.serial;source.basic=0;source.special=0;source.mode=0;
+            const auto resumed=add(source.bone,{2,-3,4});
+            scripted.complete(source,resumed);
+            equal(scripted.locate(resumed)->origin,resumed);
+        }
         {
             OutlastLocomotionCamera jumping;
             auto ground=sample;ground.root={0,0,10};ground.bone={-20,-2,178};

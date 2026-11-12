@@ -18,6 +18,8 @@ REQUIRED_TESTS = {
     "test_outlast_config", "test_outlast_camcorder", "test_outlast_native_use",
     "test_outlast_motion_controls", "test_native_camcorder_lifecycle",
     "test_outlast_hand_collision", "test_outlast_desktop_cursor", "test_outlast_vr_hints",
+    "test_outlast_body_lifecycle", "test_outlast_locomotion_camera",
+    "test_outlast_native_view", "test_outlast_focus_pause",
     "test_atlas_pixel_routing",
     "test_input_analog_recovery",
     "test_native_camera_resources", "test_native_image", "test_native_visibility",
@@ -181,6 +183,7 @@ def main(argv=None):
             "uniforms": binaries / "test_tracked_uniforms.exe",
             "camcorder": binaries / "test_outlast_camcorder.exe",
             "hand_collision": binaries / "test_outlast_hand_collision.exe",
+            "body_lifecycle": binaries / "test_outlast_body_lifecycle.exe",
         }
         inputs = {name: dict(path=str(path), sha256=sha256(path)) for name, path in paths.items()}
         report["inputs"] = inputs
@@ -230,6 +233,12 @@ def main(argv=None):
         run("reject-fixed-hand-anchor", [paths["hand_collision"], "--fault-root-anchor"],
             ["FAIL: Room-scale head/body movement left the tracked hand anchored across a wall"],
             expected_code=1)
+        run("reject-native-crouch", [paths["body_lifecycle"], "--fault-native-crouch"],
+            ["FAIL: Tracked hand detached from its moving body/controller frame"],
+            expected_code=1)
+        run("reject-nonblocking-volume", [paths["hand_collision"], "--fault-nonblocking-volume"],
+            ["FAIL: Non-blocking room volume stopped controller hand tracking"],
+            expected_code=1)
         for name, original in inputs.items():
             if sha256(paths[name]) != original["sha256"]:
                 raise ValueError(f"Input changed during acceptance: {name}")
@@ -238,7 +247,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+2} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+4} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

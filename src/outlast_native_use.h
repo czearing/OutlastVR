@@ -25,8 +25,8 @@ inline bool outlast_complete_controller_pickup(void* hero,INT action,UINT64 resu
 }
 
 inline bool outlast_native_use_action_ready(bool body_ready,const OutlastNativeUseContext& context,UINT64 now) {
-    return body_ready || (now>=context.clock && now-context.clock<=250000 && context.basic==2 &&
-        (context.special==0x31 || context.special==0x32));
+    // Hiding, doors and scripted interactions own their controls after tracked IK stops.
+    return body_ready || (context.clock && now>=context.clock && now-context.clock<=250000);
 }
 
 inline std::optional<OutlastUseRay> outlast_controller_use_ray(

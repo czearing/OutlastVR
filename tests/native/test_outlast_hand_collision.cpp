@@ -2,16 +2,51 @@
 #include <iostream>
 
 using namespace olvr;
+namespace {
+bool WINAPI native_filter_fixture(void*,NativeHandHit* hit,void*,const Vec3* end,const Vec3* start,
+                                 UINT flags,const Vec3* extent,void*) {
+    // Replay the retail blocking-query predicate, not native engine execution.
+    if ((flags&0x20) || !(flags&0x40)) {
+        hit->actor=1;hit->time=0;hit->normal={};
+        return false;
+    }
+    const float plane=100-extent->x;
+    if (end->x<=plane) return true;
+    hit->actor=2;hit->normal={-1,0,0};
+    hit->time=start->x>=plane?0:(plane-start->x)/(end->x-start->x);
+    return false;
+}
+}
 int main(int argc,char** argv) {
     try {
         const bool fixed_root_fault=argc==2 && std::string(argv[1])=="--fault-root-anchor";
-        if (argc!=1 && !fixed_root_fault) throw std::invalid_argument("Unknown hand collision fixture mode");
+        const bool overlap_filter_fault=argc==2 && std::string(argv[1])=="--fault-nonblocking-volume";
+        if (argc!=1 && !fixed_root_fault && !overlap_filter_fault)
+            throw std::invalid_argument("Unknown hand collision fixture mode");
         unsigned checks=0,traces=0;
         auto require=[&](bool value,const char* message) {
             ++checks;
             if (!value) throw std::runtime_error(message);
         };
         OutlastHandCollision collision;
+        const auto native_trace=[&](NativeHandHit& hit,Vec3 end,Vec3 start,Vec3 extent) {
+            if (overlap_filter_fault)
+                return native_filter_fixture(nullptr,&hit,nullptr,&end,&start,0x20bf,&extent,nullptr);
+            return outlast_trace_hand_volume(&native_filter_fixture,nullptr,hit,nullptr,end,start,extent);
+        };
+        for (unsigned hand=0;hand<2;++hand) {
+            auto contact=collision.update(hand,{0,0,120},{30,0,120},100,native_trace);
+            require(!contact.blocked && contact.controller_distance<.001f,
+                "Non-blocking room volume stopped controller hand tracking");
+            contact=collision.update(hand,{0,0,120},{150,40,120},100,native_trace);
+            require(contact.blocked && contact.position.x<=92 && contact.position.x>91.8f &&
+                std::abs(contact.position.y-40)<.001f,
+                "Ignoring a room trigger also bypassed the solid wall behind it");
+            contact=collision.update(hand,{0,0,120},{30,40,120},100,native_trace);
+            require(!contact.blocked && contact.controller_distance<.001f,
+                "Tracked hand did not release a solid contact inside a non-blocking room volume");
+        }
+        collision.reset();
         auto wall=[&](NativeHandHit& hit,Vec3 end,Vec3 start,Vec3 extent) {
             ++traces;
             require(extent.x==8 && extent.y==8 && extent.z==8,"Hand volume changed native units");

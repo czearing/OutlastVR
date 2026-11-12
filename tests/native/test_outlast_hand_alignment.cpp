@@ -112,6 +112,30 @@ int main(int argc,char** argv) {
             require(std::memcmp(first.atoms.data(),second.atoms.data(),count*sizeof(BoneAtom))==0,
                 "Cached subtree transforms changed native pose bytes");
         }
+        for (const float height:{20.f,40.f,60.f,80.f}) {
+            auto pose=rig;
+            auto requested=targets;
+            requested.native_crouched=true;
+            const Vec3 lowered{0,0,-height};
+            bone_translate(pose,bones[1],bone_world_to_component_vector(rig,lowered));
+            for (const INT foot:{bones[16],bones[19]}) pose.atoms[foot]=rig.atoms[foot];
+            std::array<Vec3,2> expected{};
+            for (unsigned side=0;side<2;++side) {
+                expected[side]=add(add(world_vector(rig,ik.hand_anchor(rig,side,true)),
+                    {transform[12],transform[13],transform[14]}),lowered);
+                const auto relative=scale(add(expected[side],scale(requested.tracking.origin,-1)),.01f);
+                requested.hands[side]={Vec3{dot(relative,requested.tracking.right),
+                    dot(relative,requested.tracking.up),dot(relative,requested.tracking.backward)},{0,0,0,1}};
+            }
+            const auto solved=ik.apply(pose,requested);
+            for (unsigned side=0;side<2;++side) {
+                const auto actual=add(world_vector(pose,ik.hand_anchor(pose,side,true)),
+                    {transform[12],transform[13],transform[14]});
+                const auto error=add(actual,scale(expected[side],-1));
+                require(solved.hand_target_error[side]<.03f && dot(error,error)<.001f,
+                    "Actual-rig palm detached from the controller in a synthesized native crouch");
+            }
+        }
         {
             auto requested=targets;
             requested.controller_fingers=true;
