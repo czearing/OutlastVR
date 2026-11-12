@@ -300,6 +300,7 @@ class Runtime {
     OutlastDesktopCursor::Clip original_clip_cursor_=nullptr;
     OutlastDesktopCursor::Position original_set_cursor_pos_=nullptr;
     OutlastDesktopCursor::GetPosition original_get_cursor_pos_=nullptr;
+    OutlastDesktopCursor::Cursor original_set_cursor_=nullptr;
     HWND menu_window_=nullptr;
     std::optional<POINT> menu_native_position_;
     struct MenuEdge {POINT position;bool down;};
@@ -386,6 +387,7 @@ class Runtime {
     OutlastNativeUseContext native_use_context_{};
     using NativeUseEntry=UINT64(WINAPI*)(void*,INT);
     NativeUseEntry original_pickup_=nullptr,original_use_volume_=nullptr;
+    OutlastPickupComplete complete_pickup_=nullptr;
     std::ofstream probe_native_use_;
     std::atomic<bool> native_use_thread_warned_{false};
     NativeWorldTrace world_trace_=nullptr;
@@ -732,7 +734,7 @@ class Runtime {
                 "Native interactive overlay closed: passive HUD restored");
         }
         ui_eyes_=menu_overlay_?panel_anchor_.locate_ui(tracked_,fovs_,float(width_)/height_):
-            headlocked_ui_constants(tracked_,fovs_,float(width_)/height_);
+            passive_hud_constants(tracked_,fovs_,float(width_)/height_);
         if (!test_ && !config_.physical_camcorder)
             night_vision_enabled_=night_vision_.update(motion,
                 !present_panel_ && !menu_overlay_,input_clock(),config_.comfort.primary_hand());
@@ -856,7 +858,14 @@ class Runtime {
         if (ray) scope.emplace(hero,*ray);
         const auto observed_origin=field<Vec3>(hero,0x30e4);
         const auto observed_direction=field<Vec3>(hero,0x2bd8);
+        const auto body_origin=field<Vec3>(hero,0x80);
         const auto result=original(hero,action);
+        const auto selected=field<void*>(hero,0x3648);
+        const auto special=field<BYTE>(hero,0x7bd);
+        const auto completion_begin=input_clock();
+        const bool completed=original==original_pickup_ &&
+            outlast_complete_controller_pickup(hero,action,result,ray.has_value(),complete_pickup_);
+        const auto completion_end=completed?input_clock():0;
         scope.reset();
         const bool restored=field<std::array<unsigned char,sizeof(Vec3)>>(hero,0x30e4)==before_origin &&
             field<std::array<unsigned char,sizeof(Vec3)>>(hero,0x2bd8)==before_direction;
@@ -873,10 +882,14 @@ class Runtime {
                 <<",\"origin\":";
             vector(observed_origin);out<<",\"direction\":";vector(observed_direction);
             out<<",\"native_pickup_count\":"<<field<INT>(hero,0x2c2c)
-                <<",\"selected_pickup\":"<<reinterpret_cast<std::uintptr_t>(field<void*>(hero,0x3648))
-                <<",\"special\":"<<unsigned(field<BYTE>(hero,0x7bd))
+                <<",\"selected_pickup\":"<<reinterpret_cast<std::uintptr_t>(selected)
+                <<",\"special\":"<<unsigned(special)
+                <<",\"completed_instantly\":"<<(completed?"true":"false")
+                <<",\"completion_begin_us\":"<<completion_begin<<",\"completion_end_us\":"<<completion_end
+                <<",\"special_after_completion\":"<<unsigned(field<BYTE>(hero,0x7bd))
+                <<",\"selected_after_completion\":"<<reinterpret_cast<std::uintptr_t>(field<void*>(hero,0x3648))
                 <<",\"view_restored\":"<<(restored?"true":"false")<<",\"body_origin\":";
-            vector(field<Vec3>(hero,0x80));
+            vector(body_origin);out<<",\"body_after_completion\":";vector(field<Vec3>(hero,0x80));
             if (original==original_pickup_) {
                 const auto count=field<INT>(hero,0x2c2c);
                 auto* const* items=field<void* const*>(hero,0x2c24);
@@ -1930,8 +1943,28 @@ class Runtime {
             return result;
         });
     }
+    static HCURSOR WINAPI desktop_set_cursor(HCURSOR cursor) {
+        const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+        return guarded([&] {
+            auto& r=self();
+            bool client=false;
+            if (r.menu_window_ && GetForegroundWindow()==r.menu_window_) {
+                POINT desktop{};
+                RECT rectangle{};
+                if (!r.original_get_cursor_pos_(&desktop) || !GetClientRect(r.menu_window_,&rectangle))
+                    throw std::runtime_error("Cannot determine owned menu cursor visibility");
+                const auto under=WindowFromPoint(desktop);
+                if (!ScreenToClient(r.menu_window_,&desktop))
+                    throw std::runtime_error("Cannot map owned menu cursor visibility");
+                client=PtInRect(&rectangle,desktop) &&
+                    (under==r.menu_window_ || IsChild(r.menu_window_,under));
+            }
+            return r.desktop_cursor_->cursor(r.original_set_cursor_,caller,cursor,client);
+        });
+    }
     void controller_menu_pointer(bool panel,IDirect3DSurface9* output) {
         if (!desktop_cursor_) return;
+        const bool was_active=desktop_cursor_->menu_position().has_value();
         const auto motion=motion_controls_.sample(input_clock());
         std::optional<WorldPanelHit> hit;
         std::optional<EyePose> aim;
@@ -1962,6 +1995,11 @@ class Runtime {
                 throw std::runtime_error("Cannot map tracked menu pointer to native screen coordinates");
             desktop_cursor_->menu_pointer(panel && (aim.has_value() || menu_pointer_tracking_ || menu_pointer_down_),point);
         } else desktop_cursor_->menu_pointer(false);
+        if (menu_window_ && GetForegroundWindow()==menu_window_ &&
+            was_active!=desktop_cursor_->menu_position().has_value() &&
+            !PostMessageW(menu_window_,WM_SETCURSOR,reinterpret_cast<WPARAM>(menu_window_),
+                MAKELPARAM(HTCLIENT,WM_MOUSEMOVE)))
+            throw std::runtime_error("Cannot refresh the owned native menu cursor");
         if (down!=menu_pointer_down_) {
             std::lock_guard<std::mutex> lock(menu_edge_mutex_);
             if (menu_edges_.size()>=256)
@@ -2888,7 +2926,7 @@ class Runtime {
             canvas[5]=float(viewport.Height)/height_;
             canvas[7]=1-float(viewport.Y)*2/height_-canvas[5];
             ui_eyes_=menu_overlay_?panel_anchor_.locate_ui(tracked_,fovs_,float(width_)/height_):
-                headlocked_ui_constants(tracked_,fovs_,float(width_)/height_);
+                passive_hud_constants(tracked_,fovs_,float(width_)/height_);
             for (auto& eye:ui_eyes_) {
                 Matrix4 plane{};std::copy_n(eye.begin(),16,plane.begin());
                 const auto mapped=matrix_product(plane,canvas);
@@ -3823,7 +3861,8 @@ class Runtime {
         if (!directory.VirtualAddress || directory.VirtualAddress>=module_extent_)
             throw std::runtime_error("Native image import directory is invalid");
         auto* imports=reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base_+directory.VirtualAddress);
-        void** clip=nullptr;void** position=nullptr;void** query_position=nullptr;void** direct_input=nullptr;
+        void** clip=nullptr;void** position=nullptr;void** query_position=nullptr;
+        void** cursor=nullptr;void** direct_input=nullptr;
         for (;imports->Name;++imports) {
             const auto* name=reinterpret_cast<const char*>(base_+imports->Name);
             const bool graphics=_stricmp(name,"d3d9.dll")==0;
@@ -3842,6 +3881,7 @@ class Runtime {
                 if (mouse && std::strcmp(imported,"ClipCursor")==0) selected=&clip;
                 if (mouse && std::strcmp(imported,"SetCursorPos")==0) selected=&position;
                 if (mouse && std::strcmp(imported,"GetCursorPos")==0) selected=&query_position;
+                if (mouse && std::strcmp(imported,"SetCursor")==0) selected=&cursor;
                 if (input && std::strcmp(imported,"DirectInput8Create")==0) selected=&direct_input;
                 if (!selected) continue;
                 if (*selected) throw std::runtime_error("Ambiguous native graphics/desktop input import");
@@ -3849,12 +3889,13 @@ class Runtime {
             }
         }
         if (!factory_iat_) throw std::runtime_error("Native Direct3DCreate9 import was not found");
-        if (!clip || !position || !query_position || !direct_input)
+        if (!clip || !position || !query_position || !cursor || !direct_input)
             throw std::runtime_error("Native desktop mouse imports do not match the admitted retail image");
-        desktop_input_imports_.reserve(4);
+        desktop_input_imports_.reserve(5);
         patch_input_import(clip,&desktop_clip_cursor,original_clip_cursor_);
         patch_input_import(position,&desktop_set_cursor_pos,original_set_cursor_pos_);
         patch_input_import(query_position,&desktop_get_cursor_pos,original_get_cursor_pos_);
+        patch_input_import(cursor,&desktop_set_cursor,original_set_cursor_);
         patch_input_import(direct_input,&desktop_direct_input,original_direct_input_);
         DWORD old=0,ignored=0;
         if (!VirtualProtect(factory_iat_,sizeof(void*),PAGE_READWRITE,&old))
@@ -4262,6 +4303,7 @@ public:
                     log("Simple full-view night-vision filter: right thumbstick click; physical camcorder disabled");
                 if (motion_enabled_) {
                     world_trace_=retail_entry<NativeWorldTrace>(image,0x506920);
+                    complete_pickup_=retail_entry<OutlastPickupComplete>(image,0xd8ce40);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xce8f10),&native_pickup,original_pickup_);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xd7b300),&native_use_volume,original_use_volume_);
                     if (module_extent_<0x200b5b0)

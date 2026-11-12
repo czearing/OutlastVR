@@ -690,6 +690,7 @@ int main(int argc,char** argv) {
                 motion_mock::fake.fixture_menu=held;
                 motion_mock::fake.fixture_sprint=motion_mock::fake.fixture_nv=false;
                 motion_mock::fake.fixture_use=0;
+                motion_mock::fake.fixture_grab={};
                 motion_mock::fake.fixture_move=motion_mock::fake.fixture_turn={};
             } else if (input_chords) {
                 const unsigned step=f+1;

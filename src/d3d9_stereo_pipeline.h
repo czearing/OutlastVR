@@ -32,6 +32,7 @@ struct StereoShaderBinding {
     int pixel_view_sampler=-1;
     UINT view_texture_width=8;
     std::vector<sm3::TrackedUniform> tracked_uniforms{};
+    std::vector<sm3::TrackedPair::ConstantRow> pixel_constant_rows{};
     bool tracked_world_scissor=false;
     std::vector<std::pair<unsigned,unsigned>> atlas_point_samplers{};
 };

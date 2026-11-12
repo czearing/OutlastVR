@@ -25,11 +25,18 @@ int main(int argc,char** argv) {
         std::array<double,6> submission_us{};
         const bool material_fault=argc==2 && std::string(argv[1])=="--fault-material-untracked";
         const bool camera_only_fault=argc==2 && std::string(argv[1])=="--fault-material-camera-only";
-        const bool camera_only=camera_only_fault ||
+        const bool camera_projection=argc==2 && std::string(argv[1])=="--material-camera-only-projection";
+        const bool camera_only=camera_only_fault || camera_projection ||
             (argc==2 && std::string(argv[1])=="--material-camera-only");
-        const bool material_columns=argc==2 && std::string(argv[1])=="--material-native-columns";
-        const bool material_origin=argc==2 && std::string(argv[1])=="--material-large-origin";
-        const bool material_world=argc==2 && std::string(argv[1])=="--material-world-position";
+        const bool world_columns=argc==2 && std::string(argv[1])=="--material-world-position-native";
+        const bool world_origin=argc==2 && std::string(argv[1])=="--material-world-position-large-origin";
+        const bool alternate_world=camera_projection ||
+            (argc==2 && std::string(argv[1])=="--material-alternate-varying");
+        const bool full_samplers=argc==2 && std::string(argv[1])=="--material-full-samplers";
+        const bool material_columns=world_columns || (argc==2 && std::string(argv[1])=="--material-native-columns");
+        const bool material_origin=world_origin || (argc==2 && std::string(argv[1])=="--material-large-origin");
+        const bool material_world=world_columns || world_origin || alternate_world || full_samplers ||
+            (argc==2 && std::string(argv[1])=="--material-world-position");
         const bool material=material_fault || material_columns || material_origin || camera_only || material_world ||
             (argc==2 && std::string(argv[1])=="--material-projection");
         const bool motion_fault=argc==2 && std::string(argv[1])=="--fault-motion-policy";
@@ -75,13 +82,20 @@ int main(int argc,char** argv) {
             float4 CameraUp:register(c19);
             float3 ParticleUpRightResultScalars:register(c20);
             sampler SourceData:register(s0);
-            struct Output {float4 position:POSITION;float3 ray:TEXCOORD0;float4 materialWorld:TEXCOORD5;
-                           float4 billboard:TEXCOORD6;};
+            struct Output {float4 position:POSITION;float3 ray:TEXCOORD0;float4 materialWorld:MATERIAL_WORLD_SEMANTIC;
+                           float4 billboard:TEXCOORD6;
+#if ALTERNATE_WORLD
+                           float4 unrelated:TEXCOORD5;
+#endif
+            };
             Output main(float2 position:POSITION) {
                 Output output;
                 output.position=float4(position,tex2Dlod(SourceData,float4(.5,.5,0,0)).r,1);
                 output.ray=MUL_NATIVE(ScreenToWorldOffset,float4(position,1,0)).xyz;
                 output.materialWorld=float4(output.ray*MATERIAL_DEPTH+CameraPositionVS.xyz,1);
+#if ALTERNATE_WORLD
+                output.unrelated=float4(0,0,0,output.ray.z*.003);
+#endif
                 output.billboard=float4(CameraRight.xyz*.25+CameraUp.xyz*.5+CameraWorldPosition.xyz*.01,
                     (CameraRight.w+CameraUp.w+CameraWorldPosition.w)/128+ParticleUpRightResultScalars.x);
                 return output;
@@ -99,7 +113,12 @@ int main(int argc,char** argv) {
             float4 CameraWorldPos:register(c32);
             float4 MotionBlurMaskScaleAndBias:register(c36);
             float4 DynamicVelocityParameters:register(c37);
-            float4 main(float3 ray:TEXCOORD0,float4 materialWorld:TEXCOORD5,float4 billboard:TEXCOORD6,float2 pixel:VPOS):COLOR {
+            sampler MaterialTextures[16]:register(s0);
+            float4 main(float3 ray:TEXCOORD0,float4 materialWorld:MATERIAL_WORLD_SEMANTIC,
+#if ALTERNATE_WORLD
+                float4 unrelated:TEXCOORD5,
+#endif
+                float4 billboard:TEXCOORD6,float2 pixel:VPOS):COLOR {
 #if BILLBOARD_TEST
                 return float4(billboard.xyz*.2+.5,billboard.w);
 #endif
@@ -107,14 +126,27 @@ int main(int argc,char** argv) {
                 return float4((MotionBlurMaskScaleAndBias.xyz+DynamicVelocityParameters.xyz)*.01+.5,.5);
 #endif
 #if MATERIAL_CAMERA_ONLY
+#if MATERIAL_CAMERA_PROJECTION
+                float4 cameraProjected=MUL_NATIVE(ViewProjectionMatrix,materialWorld);
+                return float4(CameraWorldPos.x*.0025+.5,cameraProjected.x/cameraProjected.w*.2+.5,
+                    CameraWorldPos.z*.0025+.5,CameraWorldPos.w/128);
+#endif
                 return float4(CameraWorldPos.xyz*.0025+.5,CameraWorldPos.w/128);
 #endif
 #if MATERIAL_TEST
                 float4 projected=MUL_NATIVE(ViewProjectionMatrix,materialWorld);
                 float3 absolute=materialWorld.xyz+CameraWorldPos.xyz;
 #if MATERIAL_WORLD_TEST
+                float extra=0;
+#if ALTERNATE_WORLD
+                extra=unrelated.w*.000001;
+#endif
+#if FULL_SAMPLERS
+                [unroll] for (int samplerIndex=0;samplerIndex<16;++samplerIndex)
+                    extra+=tex2D(MaterialTextures[samplerIndex],pixel*.01).r*.000001;
+#endif
                 return float4(projected.x/projected.w*.2+.5,absolute.z*.005+.5,
-                    materialWorld.x*.005+.5,CameraWorldPos.w/128);
+                    materialWorld.x*.005+.5,CameraWorldPos.w/128+extra);
 #endif
                 return float4(projected.xy/projected.w*.2+.5,absolute.z*.005+.5,CameraWorldPos.w/128);
 #endif
@@ -143,6 +175,10 @@ int main(int argc,char** argv) {
         Com<ID3DBlob> vertex_code,pixel_code;
         const std::string prefix=std::string("#define MUL_NATIVE(m,v) mul(m,v)\n#define MATRIX_STORAGE ")+
             (native_columns?"column_major\n":"row_major\n")+
+            (alternate_world?"#define MATERIAL_WORLD_SEMANTIC TEXCOORD7\n#define ALTERNATE_WORLD 1\n":
+                "#define MATERIAL_WORLD_SEMANTIC TEXCOORD5\n#define ALTERNATE_WORLD 0\n")+
+            (full_samplers?"#define FULL_SAMPLERS 1\n":"#define FULL_SAMPLERS 0\n")+
+            (camera_projection?"#define MATERIAL_CAMERA_PROJECTION 1\n":"#define MATERIAL_CAMERA_PROJECTION 0\n")+
             (material_origin?"#define ScreenToWorldOffset ScreenToTranslatedWorld\n":"")+
             (material_origin?"#define MATERIAL_DEPTH .25\n":"#define MATERIAL_DEPTH 25\n")+
             (native_translated?"#define TRANSLATED_NATIVE 1\n":"#define TRANSLATED_NATIVE 0\n")+
@@ -174,6 +210,13 @@ int main(int argc,char** argv) {
         std::memset(lock.pBits,0,16);
         gpu_check(source_data->UnlockRect(0),"Unlock original VTF sentinel");
         gpu_check(device.SetTexture(D3DVERTEXTEXTURESAMPLER0,source_data.get()),"Bind original VTF sentinel");
+        if (full_samplers)
+            for (unsigned sampler=0;sampler<16;++sampler) {
+                gpu_check(device.SetTexture(sampler,source_data.get()),"Bind all sixteen native material samplers");
+                gpu_check(device.SetSamplerState(sampler,D3DSAMP_MINFILTER,D3DTEXF_POINT),"Set native material minification");
+                gpu_check(device.SetSamplerState(sampler,D3DSAMP_MAGFILTER,D3DTEXF_POINT),"Set native material magnification");
+                gpu_check(device.SetSamplerState(sampler,D3DSAMP_MIPFILTER,D3DTEXF_NONE),"Disable native material mips");
+            }
         for (const auto state:{D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER})
             gpu_check(device.SetSamplerState(D3DVERTEXTEXTURESAMPLER0,state,D3DTEXF_POINT),"Point sample original VTF");
         gpu_check(device.SetSamplerState(D3DVERTEXTEXTURESAMPLER0,D3DSAMP_MIPFILTER,D3DTEXF_NONE),"Disable original VTF mips");
@@ -415,6 +458,12 @@ int main(int argc,char** argv) {
                 gpu_check(device.SetScissorRect(&scissor),"Change caller scissor");
                 caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
             }
+            if (full_samplers) {
+                if (pipeline.diagnostic_binding().pixel_constant_rows.empty() ||
+                    pipeline.diagnostic_binding().pixel_view_sampler>=0)
+                    throw std::runtime_error("Sampler-saturated material did not use paired constant rows");
+                caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
+            }
             const auto begin=std::chrono::steady_clock::now();
             for (unsigned repeat=0;repeat<(benchmark?benchmark_draws:1u);++repeat) {
                 const auto submission=declaration_cache || caller_state?
@@ -425,7 +474,7 @@ int main(int argc,char** argv) {
             }
             submission_us[serial]=std::chrono::duration<double,std::micro>(
                 std::chrono::steady_clock::now()-begin).count()/(benchmark?benchmark_draws:1u);
-            if (caller_state) {
+            if (caller_state || full_samplers) {
                 if (caller_fault) {
                     const float corrupt[]{123,456,789,1};
                     gpu_check(device.SetPixelShaderConstantF(12,corrupt,1),"Inject caller-state corruption");
@@ -486,7 +535,8 @@ int main(int argc,char** argv) {
                         return numerator/denominator;
                     };
                     const float value=billboard?component(billboard_value,axis)*.2f+.5f:
-                        motion?.5f:camera_only?component(origin,axis)*.0025f+.5f:
+                        motion?.5f:camera_only?(camera_projection && axis==1?nx*.2f+.5f:
+                            component(origin,axis)*.0025f+.5f):
                         material_world?(axis==0?nx*.2f+.5f:axis==1?world.z*.005f+.5f:
                             (world.x+frame.pretranslation.x)*.005f+.5f):material?(axis==0?nx*.2f+.5f:
                         axis==1?ny*.2f+.5f:world.z*.005f+.5f):shadow?

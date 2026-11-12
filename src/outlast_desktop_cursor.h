@@ -70,12 +70,18 @@ public:
     using Clip=BOOL(WINAPI*)(const RECT*);
     using Position=BOOL(WINAPI*)(int,int);
     using GetPosition=BOOL(WINAPI*)(POINT*);
+    using Cursor=HCURSOR(WINAPI*)(HCURSOR);
     OutlastDesktopCursor(std::uintptr_t base,std::size_t extent):base_(base),end_(base) {
         if (!base || !extent || extent>std::numeric_limits<std::uintptr_t>::max()-base)
             throw std::invalid_argument("Desktop cursor policy requires a bounded native image");
         end_+=extent;
     }
     bool owns(std::uintptr_t caller) const {return caller>=base_ && caller<end_;}
+    HCURSOR cursor(Cursor original,std::uintptr_t caller,HCURSOR requested,bool focused_client) const {
+        if (!original) throw std::invalid_argument("Missing original cursor visibility entry");
+        std::lock_guard<std::mutex> lock(mutex_);
+        return original(owns(caller) && menu_active_ && focused_client?nullptr:requested);
+    }
     void menu_pointer(bool active,POINT point={}) {
         std::lock_guard<std::mutex> lock(mutex_);
         menu_active_=active;menu_point_=point;

@@ -33,12 +33,12 @@ int main() {
         const auto packet=output.dwPacketNumber;
         controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,1002);
         require(output.dwPacketNumber==packet,"Unchanged input advanced packet number");
-        frame.hands[1].trigger=.5f;controls.publish(frame,2000);
+        frame.hands[1].squeeze=.5f;controls.publish(frame,2000);
         controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,2001);
-        require((output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0,"Trigger hysteresis released early");
-        frame.hands[1].trigger=.4f;controls.publish(frame,3000);
+        require((output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0,"Grip hysteresis released early");
+        frame.hands[1].squeeze=.4f;controls.publish(frame,3000);
         controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,3001);
-        require((output.Gamepad.wButtons&XINPUT_GAMEPAD_X)==0,"Trigger release latched");
+        require((output.Gamepad.wButtons&XINPUT_GAMEPAD_X)==0,"Grip release latched");
         physical.Gamepad.wButtons=XINPUT_GAMEPAD_DPAD_LEFT;
         physical.Gamepad.sThumbRY=1234;
         controls.state(0,&output,ERROR_SUCCESS,physical,3002);
@@ -62,6 +62,7 @@ int main() {
             OutlastMotionControls menu;
             MotionFrame mapped{};mapped.focused=true;
             mapped.hands[1].primary=true;mapped.hands[1].trigger=1;
+            mapped.hands[1].squeeze=1;
             mapped.hands[1].aim_tracked=true;
             menu.publish(mapped,4100);
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4101,true);
@@ -73,15 +74,15 @@ int main() {
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4103,false);
             require(output.Gamepad.wButtons==XINPUT_GAMEPAD_A,
                 "Held menu click became gameplay interaction on scene transition");
-            mapped.hands[1].trigger=.5f;menu.publish(mapped,4200);
+            mapped.hands[1].squeeze=.5f;menu.publish(mapped,4200);
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4201);
             require(output.Gamepad.wButtons==XINPUT_GAMEPAD_A,
                 "Half-released menu click bypassed gameplay release hysteresis");
-            mapped.hands[1].trigger=0;menu.publish(mapped,4300);
-            mapped.hands[1].trigger=1;menu.publish(mapped,4400);
+            mapped.hands[1].squeeze=0;menu.publish(mapped,4300);
+            mapped.hands[1].squeeze=1;menu.publish(mapped,4400);
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4401);
             require(output.Gamepad.wButtons==(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X),
-                "A fresh gameplay trigger remained blocked after menu release");
+                "A fresh gameplay grip remained blocked after menu release");
             XINPUT_STATE external{};external.Gamepad.wButtons=XINPUT_GAMEPAD_X;
             menu.state(0,&output,ERROR_SUCCESS,external,4402,true);
             require(output.Gamepad.wButtons==(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X),
@@ -96,8 +97,8 @@ int main() {
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4602,false);
             require(output.Gamepad.wButtons==XINPUT_GAMEPAD_A,
                 "Reacquired held menu trigger became a gameplay action after closing");
-            mapped.hands[1].trigger=0;menu.publish(mapped,4700);
-            mapped.hands[1].trigger=1;menu.publish(mapped,4800);
+            mapped.hands[1].squeeze=0;menu.publish(mapped,4700);
+            mapped.hands[1].squeeze=1;menu.publish(mapped,4800);
             menu.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,4801);
             require(output.Gamepad.wButtons==(XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X),
                 "Reacquisition latch blocked a genuinely fresh gameplay interaction");
@@ -149,7 +150,7 @@ int main() {
             OutlastMotionControls interaction;
             MotionFrame held{};held.focused=true;held.hands[1].aim_tracked=true;
             interaction.publish(held,1000);
-            held.hands[1].trigger=1;interaction.publish(held,1100);
+            held.hands[1].squeeze=1;interaction.publish(held,1100);
             interaction.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,1101);
             require(output.Gamepad.wButtons==XINPUT_GAMEPAD_X,"Fresh tracked use did not start");
             auto lost=held;
@@ -162,12 +163,12 @@ int main() {
             require(output.Gamepad.wButtons==0,"Tracking/focus/time/native-pose interruption retained virtual use");
             interaction.publish(held,clock+100);
             interaction.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,clock+101);
-            require(output.Gamepad.wButtons==0,"Reacquired held trigger became a phantom interaction");
-            held.hands[1].trigger=.5f;interaction.publish(held,clock+200);
+            require(output.Gamepad.wButtons==0,"Reacquired held grip became a phantom interaction");
+            held.hands[1].squeeze=.5f;interaction.publish(held,clock+200);
             interaction.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,clock+201);
             require(output.Gamepad.wButtons==0,"Half release rearmed an interrupted native use");
-            held.hands[1].trigger=.4f;interaction.publish(held,clock+300);
-            held.hands[1].trigger=1;interaction.publish(held,clock+400);
+            held.hands[1].squeeze=.4f;interaction.publish(held,clock+300);
+            held.hands[1].squeeze=1;interaction.publish(held,clock+400);
             interaction.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,clock+401);
             require(output.Gamepad.wButtons==XINPUT_GAMEPAD_X,"Fresh release/press did not recover native use");
             XINPUT_STATE external{};external.Gamepad.wButtons=XINPUT_GAMEPAD_X;
@@ -185,14 +186,29 @@ int main() {
             };
             require(buttons()==0,"Left grip still sprints instead of remaining available for grabbing");
             mapped.hands[1].squeeze=1;
-            require(buttons()==0,"Right grip still toggles the camera without a physical chest grab");
+            require(buttons()==XINPUT_GAMEPAD_X,"Right grip did not interact exclusively");
+            mapped.hands[1].squeeze=0;
             mapped.hands[0].stick_click=true;
             require(buttons()==XINPUT_GAMEPAD_LEFT_SHOULDER,
                 "Left thumbstick click did not sprint exclusively");
             mapped.hands[0].stick_click=false;mapped.hands[0].primary=true;
             require(buttons()==XINPUT_GAMEPAD_BACK,"Left primary did not open notes exclusively");
             mapped.hands[0].primary=false;mapped.hands[1].trigger=1;
-            require(buttons()==XINPUT_GAMEPAD_X,"Right trigger did not retain native interaction");
+            require(buttons()==0,"Menu trigger incorrectly initiated a gameplay grab");
+        }
+        for (const bool left_handed:{false,true}) {
+            OutlastMotionControls bindings;
+            OutlastComfortSettings options;options.left_handed=left_handed;bindings.configure(options);
+            MotionFrame input{};input.focused=true;
+            const auto hand=options.primary_hand();
+            input.hands[hand].aim_tracked=true;
+            bindings.publish(input,6000);
+            input.hands[hand].trigger=1;bindings.publish(input,6100);
+            bindings.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,6101);
+            require(output.Gamepad.wButtons==0,"Index trigger grabbed instead of the selected hand's grip");
+            input.hands[hand].squeeze=1;bindings.publish(input,6200);
+            bindings.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,6201);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_X,"Handedness selected the wrong grab grip");
         }
         {
             OutlastMotionControls feedback;

@@ -99,8 +99,8 @@ public:
         else if (!frame_.hands[primary].secondary) manual_blocked_=false;
         else if (!manual_down_ && !manual_blocked_) manual_pulse_=true;
         manual_down_=frame_.hands[primary].secondary;
-        use_=threshold(frame_.hands[primary].trigger,use_);
-        if (frame_.focused && frame_.hands[primary].aim_tracked && frame_.hands[primary].trigger<=.45f)
+        use_=threshold(frame_.hands[primary].squeeze,use_);
+        if (frame_.focused && frame_.hands[primary].aim_tracked && frame_.hands[primary].squeeze<=.45f)
             use_blocked_=false;
     }
     MotionFrame sample(UINT64 now) const {

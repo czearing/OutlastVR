@@ -42,7 +42,8 @@ Default right-handed bindings:
 | Left stick / right stick | Move / turn |
 | Right stick click | Toggle full-view night-vision filter |
 | Left stick click | Sprint |
-| Right trigger | Interact; select pointed menu items |
+| Right grip | Grab / interact |
+| Either trigger | Select pointed menu items |
 | Right primary / secondary | Jump or confirm / crouch or back |
 | Left primary / secondary | Notes / reload battery |
 | Left menu button | Pause |
@@ -64,7 +65,10 @@ Edit `OutlastVR.ini` beside the launcher, then restart the game.
 The `[vr]` settings include `snap_turn_degrees` (0 for smooth, 30 for snap),
 `seated`, `left_handed`, `toggle_sprint`, `movement_reference` (`game`, `head`, `main_hand`,
 `off_hand`), `world_scale` (0.5..2) and `vignette_strength` (0..1).
-Left-handed mode swaps the controls. Seated mode uses button crouching.
+Left-handed mode swaps gameplay controls. Either trigger can select menu items.
+Seated mode uses button crouching.
+Inventory pickups complete immediately; doors and other scripted interactions
+keep their native behavior.
 With `toggle_sprint=true`, click again or stop moving to stop sprinting.
 
 ```ini

@@ -14,8 +14,10 @@ inline Quaternion binocular_orientation(const std::array<EyePose,2>& eyes) {
 }
 
 inline StereoViewConstants headlocked_ui_constants(const std::array<EyePose,2>& eyes,
-    const std::array<EyeFov,2>& fovs,float aspect,float distance=2.f) {
-    if (!std::isfinite(aspect) || aspect<=0 || !std::isfinite(distance) || distance<=.01f)
+    const std::array<EyeFov,2>& fovs,float aspect,float distance=2.f,
+    float half_height_limit=std::numeric_limits<float>::infinity()) {
+    if (!std::isfinite(aspect) || aspect<=0 || !std::isfinite(distance) || distance<=.01f ||
+        std::isnan(half_height_limit) || half_height_limit<=0)
         throw std::invalid_argument("Invalid headlocked UI plane");
     const auto orientation=binocular_orientation(eyes);
     const auto right=rotate(orientation,{1,0,0}),up=rotate(orientation,{0,1,0});
@@ -23,7 +25,7 @@ inline StereoViewConstants headlocked_ui_constants(const std::array<EyePose,2>& 
         scale(rotate(orientation,{0,0,-1}),distance));
     const TrackingFrame frame{{0,0,0},{1,0,0},{0,1,0},{0,0,1},1,{0,0,0}};
     StereoViewConstants result{};
-    float half_height=std::numeric_limits<float>::infinity();
+    float half_height=half_height_limit;
     for (unsigned eye=0;eye<2;++eye) {
         result[eye]=eye_constants(frame,eyes[eye],fovs[eye],.01f,1000);
         for (unsigned axis=0;axis<2;++axis) for (float side:{-1.f,1.f}) {
@@ -49,5 +51,11 @@ inline StereoViewConstants headlocked_ui_constants(const std::array<EyePose,2>& 
         std::copy(transform.begin(),transform.end(),eye.begin());
     }
     return result;
+}
+inline StereoViewConstants passive_hud_constants(const std::array<EyePose,2>& eyes,
+    const std::array<EyeFov,2>& fovs,float aspect) {
+    // Keep existing edge notices within 25 degrees vertically and 35 horizontally at 2 m.
+    return headlocked_ui_constants(eyes,fovs,aspect,2.f,
+        2.f*std::min(.466307658f,.700207538f/aspect));
 }
 }

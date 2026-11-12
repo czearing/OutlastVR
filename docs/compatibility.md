@@ -27,8 +27,8 @@ is available, press both secondary actions to pause.
 
 - This is a preview. Campaign progression, headset performance and controller
   alignment still need playtesting.
-- Reported glass/transparency, carpet and scripted-interaction issues need
-  scene-specific checks.
+- Reported glass and security-office material artifacts have been corrected.
+  Other scenes and scripted interactions still need playtesting.
 - The default night-vision filter does not use batteries or display the native
   camera HUD.
 - The physical camcorder has visibility issues and is disabled by default.

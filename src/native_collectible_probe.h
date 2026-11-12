@@ -38,6 +38,12 @@ private:
         if (!object) throw std::invalid_argument("Null native collectible observer input");
         T value{};std::memcpy(&value,static_cast<const BYTE*>(object)+offset,sizeof(value));return value;
     }
+    static UINT64 clock_us() {
+        LARGE_INTEGER now{},frequency{};
+        if (!QueryPerformanceCounter(&now) || !QueryPerformanceFrequency(&frequency) || !frequency.QuadPart)
+            throw std::runtime_error("Cannot timestamp native inventory collection");
+        return UINT64(double(now.QuadPart)*1000000/frequency.QuadPart);
+    }
     std::string native_name(UINT64 tag) const {
         const auto index=UINT(tag),number=UINT(tag>>32);
         const auto* image=reinterpret_cast<const void*>(base_);
@@ -181,8 +187,10 @@ private:
             self.original_collect_(item,hero);
             const auto after=inventory(profile,0x70,tag),unread_after=inventory(profile,0x80,tag);
             const auto flags_after=read<UINT>(item,0x250);
+            const auto collected_at=clock_us();
             std::lock_guard<std::mutex> lock(self.mutex_);
             self.trace_<<"{\"kind\":\"collect\",\"world\":"<<self.world_.load()
+                <<",\"clock_us\":"<<collected_at
                 <<",\"hero\":"<<reinterpret_cast<std::uintptr_t>(hero)
                 <<",\"item\":"<<reinterpret_cast<std::uintptr_t>(item)<<",\"tag\":"<<tag
                 <<",\"flags_before\":"<<flags_before<<",\"flags_after\":"<<flags_after

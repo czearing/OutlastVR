@@ -273,6 +273,7 @@ public:
         bindings.pixel_view_sampler=tracking.pixel_sampler;
         bindings.view_texture_width=tracking.texture_width;
         bindings.tracked_uniforms=std::move(tracking.uniforms);
+        bindings.pixel_constant_rows=std::move(tracking.pixel_constant_rows);
         bindings.tracked_world_scissor=tracked_uniforms && patched.view_texture && scissor &&
             viewport_transform && !ui_plane;
         variant->pipeline=std::make_unique<D3D9StereoPipeline>(*device_.get(),bindings,state_cache_);

@@ -733,6 +733,7 @@ XrResult XRAPI_CALL probe_locate(XrSession session,const XrViewLocateInfo* info,
             motion_mock::fake.fixture_move={};
             motion_mock::fake.fixture_sprint=false;
             motion_mock::fake.fixture_use=0;
+            motion_mock::fake.fixture_grab={};
             motion_mock::fake.fixture_menu=false;motion_mock::fake.fixture_notes=false;
             for (unsigned eye=0;eye<2;++eye) {
                 output[eye].pose={{0,0,0,1},{eye?.032f:-.032f,1.7f,0}};
@@ -799,13 +800,10 @@ XrResult XRAPI_CALL probe_locate(XrSession session,const XrViewLocateInfo* info,
                             (!collectible_press_world || world>=collectible_press_world+100)) {
                             collectible_press_world=world;++collectible_attempts;
                         }
-                        motion_mock::fake.fixture_use=collectible_press_world &&
+                        motion_mock::fake.fixture_grab[1]=collectible_press_world &&
                             world<collectible_press_world+8?1.f:0.f;
                     }
                 }
-                const auto notified=collectible_probe->notified_at();
-                if (notified && world>=notified+100 && world<notified+108)
-                    motion_mock::fake.fixture_use=1;
             }
             const auto& aim=motion_mock::fake.fixture_aim_rotations[1];
             collectible_fixture<<"{\"world\":"<<world<<",\"hero\":"<<observed.hero
@@ -813,7 +811,8 @@ XrResult XRAPI_CALL probe_locate(XrSession session,const XrViewLocateInfo* info,
                 <<",\"move\":["<<motion_mock::fake.fixture_move.x<<','<<motion_mock::fake.fixture_move.y
                 <<"],\"aim\":["<<aim.x<<','<<aim.y<<','<<aim.z<<','<<aim.w
                 <<"],\"trigger\":"<<motion_mock::fake.fixture_use<<",\"attempts\":"<<collectible_attempts
-                <<",\"route_version\":5,\"route_stage\":"<<collectible_route<<"}\n";
+                <<",\"grip\":"<<motion_mock::fake.fixture_grab[1]
+                <<",\"route_version\":6,\"route_stage\":"<<collectible_route<<"}\n";
             collectible_fixture.flush();
             if (!collectible_fixture) throw std::runtime_error("Cannot retain native collectible input evidence");
             if (world>=300 && !observed.item && !collectible_probe->collected())

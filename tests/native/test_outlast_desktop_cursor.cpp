@@ -6,6 +6,8 @@ unsigned checks=0,clips=0,positions=0;
 const RECT* last_rectangle=nullptr;
 int last_x=0,last_y=0;
 BOOL result=TRUE;
+HCURSOR current_cursor=nullptr;
+HCURSOR WINAPI cursor(HCURSOR value) {const auto previous=current_cursor;current_cursor=value;return previous;}
 BOOL WINAPI clip(const RECT* rectangle) {++clips;last_rectangle=rectangle;return result;}
 BOOL WINAPI position(int x,int y) {++positions;last_x=x;last_y=y;return result;}
 BOOL WINAPI get_position(POINT* point) {if (point) *point={-300,700};return result;}
@@ -20,6 +22,23 @@ int main(int argc,char** argv) {
         require(argc==1 || fixed_hand_fault);
         constexpr std::uintptr_t base=0x140000000ull,extent=0x3000000;
         olvr::OutlastDesktopCursor policy(base,extent);
+        const auto arrow=reinterpret_cast<HCURSOR>(0x1234);
+        const auto previous=reinterpret_cast<HCURSOR>(0x5678);
+        for (const bool menu:{false,true})
+            for (const bool client:{false,true})
+                for (const auto caller:{base,base+extent-1,base-1,base+extent}) {
+                    policy.menu_pointer(menu,{20,30});
+                    current_cursor=previous;
+                    require(policy.cursor(&cursor,caller,arrow,client)==previous,
+                        "Native cursor visibility changed SetCursor return semantics");
+                    require(current_cursor==(menu && client && policy.owns(caller)?nullptr:arrow),
+                        "Menu cursor hiding escaped its owned focused client or failed to hide");
+                }
+        policy.menu_pointer(false);
+        bool missing_cursor=false;
+        try {policy.cursor(nullptr,base,arrow,true);}
+        catch (const std::invalid_argument&) {missing_cursor=true;}
+        require(missing_cursor,"Missing cursor visibility binding silently succeeded");
         const RECT rectangle{100,100,900,700};
         for (const auto caller:{base,base+12345,base+extent-1}) {
             require(policy.owns(caller));

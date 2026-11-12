@@ -9,6 +9,21 @@ namespace olvr {
 struct OutlastUseRay {Vec3 origin,direction;};
 struct OutlastNativeUseContext {UINT64 clock=0;unsigned basic=0,special=0;};
 
+using OutlastPickupComplete=void(WINAPI*)(void*);
+inline bool outlast_complete_controller_pickup(void* hero,INT action,UINT64 result,
+                                               bool controller,OutlastPickupComplete complete) {
+    if (!controller || !action || !result) return false;
+    if (!hero || !complete) throw std::invalid_argument("Missing native pickup completion binding");
+    const auto* bytes=static_cast<const unsigned char*>(hero);
+    if (bytes[0x7bc]!=2 || bytes[0x7bd]!=0x31) return false;
+    void* selected=nullptr;
+    std::memcpy(&selected,bytes+0x3648,sizeof(selected));
+    if (!selected) throw std::runtime_error("Admitted native pickup lost its selected item");
+    // Normal completion owns inventory/events, animation teardown and movement restoration.
+    complete(hero);
+    return true;
+}
+
 inline bool outlast_native_use_action_ready(bool body_ready,const OutlastNativeUseContext& context,UINT64 now) {
     return body_ready || (now>=context.clock && now-context.clock<=250000 && context.basic==2 &&
         (context.special==0x31 || context.special==0x32));

@@ -105,7 +105,7 @@ int main(int argc,char** argv) {
         controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,50001);
         require(output.Gamepad.sThumbLX==32767 && std::abs(output.Gamepad.sThumbLY)<=1 &&
             output.Gamepad.sThumbRX==0,"Left-handed movement or snap/native-turn isolation failed");
-        motion.hands[0].trigger=1;controls.publish(motion,51000);
+        motion.hands[0].squeeze=1;controls.publish(motion,51000);
         controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,51001);
         require(output.Gamepad.wButtons&XINPUT_GAMEPAD_X,"Left-handed interaction did not map to native use");
         motion.turn={1,1};controls.movement_yaw(.5235987756f);

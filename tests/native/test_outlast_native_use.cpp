@@ -7,6 +7,15 @@
 using namespace olvr;
 namespace {
 unsigned checks=0;
+unsigned completions=0;
+void WINAPI complete_pickup(void* hero) {
+    ++completions;
+    auto* bytes=static_cast<unsigned char*>(hero);
+    bytes[0x7bc]=0;bytes[0x7bd]=0;
+    const void* selected=nullptr;
+    std::memcpy(bytes+0x3648,&selected,sizeof(selected));
+    bytes[0x101]=0x73;
+}
 void require(bool value,const char* message) {
     ++checks;
     if (!value) throw std::runtime_error(message);
@@ -26,6 +35,40 @@ int main() {
     try {
         static_assert(!std::is_copy_constructible_v<OutlastNativeUsePose>);
         static_assert(!std::is_copy_assignable_v<OutlastNativeUsePose>);
+        {
+            std::array<unsigned char,0x4500> hero{};
+            void* selected=reinterpret_cast<void*>(0x1234);
+            for (unsigned basic=0;basic<4;++basic)
+                for (unsigned special=0;special<64;++special) {
+                    hero.fill(0);hero[0x7bc]=basic;hero[0x7bd]=special;
+                    std::memcpy(hero.data()+0x3648,&selected,sizeof(selected));
+                    const auto before=hero;
+                    const auto calls=completions;
+                    const bool eligible=basic==2 && special==0x31;
+                    require(outlast_complete_controller_pickup(hero.data(),1,1,true,&complete_pickup)==eligible,
+                        "Instant pickup completed an unrelated native interaction");
+                    require(completions==calls+unsigned(eligible),
+                        "Native pickup completion did not run exactly once");
+                    require(eligible?(hero[0x7bd]==0 && hero[0x101]==0x73):hero==before,
+                        "Native completion effects were overwritten or unrelated state was changed");
+                }
+            hero.fill(0);hero[0x7bc]=2;hero[0x7bd]=0x31;
+            std::memcpy(hero.data()+0x3648,&selected,sizeof(selected));
+            const auto before=hero;
+            for (const auto gate:{0,1,2}) {
+                const auto calls=completions;
+                require(!outlast_complete_controller_pickup(hero.data(),gate==0?0:1,gate==1?0:1,
+                    gate!=2,&complete_pickup) && hero==before && completions==calls,
+                    "Query-only, refused or non-controller pickup ran inventory completion");
+            }
+            rejects([&] {outlast_complete_controller_pickup(nullptr,1,1,true,&complete_pickup);});
+            rejects([&] {outlast_complete_controller_pickup(hero.data(),1,1,true,nullptr);});
+            selected=nullptr;std::memcpy(hero.data()+0x3648,&selected,sizeof(selected));
+            bool missing=false;
+            try {outlast_complete_controller_pickup(hero.data(),1,1,true,&complete_pickup);}
+            catch (const std::runtime_error&) {missing=true;}
+            require(missing,"Admitted pickup without a selected item silently succeeded");
+        }
         for (unsigned basic=0;basic<16;++basic)
             for (unsigned special=0;special<64;++special) {
                 const bool expected=basic==2 && (special==0x31 || special==0x32);
@@ -52,20 +95,20 @@ int main() {
                 return (output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0;
             };
             require(!poll(0,0,true,1000),"Released controller started a pickup");
-            frame.hands[1].trigger=1;
+            frame.hands[1].squeeze=1;
             require(poll(0,0,true,2000),"Fresh controller did not start a native pickup");
             require(poll(2,49,false,3000),
                 "Observed retail basic 2 / special 49 interrupted the held pickup action");
-            frame.hands[1].trigger=0;
+            frame.hands[1].squeeze=0;
             require(!poll(2,49,false,4000),"Native pickup lost its controller release");
-            frame.hands[1].trigger=1;
+            frame.hands[1].squeeze=1;
             require(poll(2,49,false,5000),"Native pickup did not accept a fresh continuation press");
             require(poll(2,50,false,6000),"Native use-volume animation interrupted its action");
             require(!poll(2,31,false,7000),"Decimal 31 was mistaken for native special 0x31");
             require(!poll(2,49,false,8000),"Held input rearmed after an unrelated native state");
-            frame.hands[1].trigger=0;
+            frame.hands[1].squeeze=0;
             require(!poll(0,0,true,9000),"Native interaction return generated a phantom press");
-            frame.hands[1].trigger=1;
+            frame.hands[1].squeeze=1;
             require(poll(0,0,true,10000),"Controller did not recover after native interaction completion");
         }
         TrackingFrame tracking{{100,200,300},{0,1,0},{0,0,1},{-1,0,0},100,{9000,-7000,4000}};

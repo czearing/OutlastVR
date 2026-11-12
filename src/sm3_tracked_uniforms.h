@@ -24,6 +24,8 @@ struct TrackedPair {
     unsigned texture_width=8;
     bool vertex_texture=false;
     int pixel_sampler=-1;
+    struct ConstantRow {unsigned texture_row,left,right;};
+    std::vector<ConstantRow> pixel_constant_rows;
 };
 
 inline std::uint32_t float_word(float value) {
@@ -39,9 +41,21 @@ inline TrackedPair track_uniforms(Pair pair) {
     unsigned next_row=8;
     std::vector<unsigned> zero_motion_registers;
     for (const bool vertex:{true,false}) {
-        const auto info=inspect(parse(vertex?result.pair.vertex:result.pair.pixel));
-        const bool material_camera=!vertex && std::any_of(info.constants.begin(),info.constants.end(),
+        const auto native_instructions=parse(vertex?result.pair.vertex:result.pair.pixel);
+        const auto info=inspect(native_instructions);
+        const auto camera=std::find_if(info.constants.begin(),info.constants.end(),
             [](const Constant& c){return c.set==2 && c.name=="CameraWorldPos";});
+        const bool material_camera=!vertex && camera!=info.constants.end();
+        const bool native_material_offset=material_camera &&
+            (std::any_of(info.declarations.begin(),info.declarations.end(),[](const Declaration& d) {
+                return d.type==1 && d.usage==5 && d.semantic==5 && (d.mask&7);
+            }) || std::any_of(native_instructions.begin(),native_instructions.end(),
+                [&](const Instruction& instruction) {
+                    if (instruction.opcode!=2 || instruction.tokens.size()!=4) return false;
+                    const auto a=instruction.tokens[2],b=instruction.tokens[3];
+                    return (kind(a)==2 && index(a)==camera->number && kind(b)==1) ||
+                        (kind(b)==2 && index(b)==camera->number && kind(a)==1);
+                }));
 #ifndef OLVR_UNTRACKED_PARTICLE_CAMERA
         const bool particle_camera=vertex && std::any_of(info.constants.begin(),info.constants.end(),
             [](const Constant& c){return c.set==2 && c.name=="ParticleUpRightResultScalars";});
@@ -56,7 +70,7 @@ inline TrackedPair track_uniforms(Pair pair) {
             TrackedUniformKind kind{};
             unsigned rows=0;
             if (!vertex && constant.name=="ViewProjectionMatrix") {
-                kind=material_camera?TrackedUniformKind::material_projection:
+                kind=native_material_offset?TrackedUniformKind::material_projection:
                     TrackedUniformKind::translated_projection;rows=4;
             } else if (material_camera && constant.name=="CameraWorldPos") {
                 kind=TrackedUniformKind::material_camera;rows=1;
@@ -92,9 +106,7 @@ inline TrackedPair track_uniforms(Pair pair) {
             if (constant.count!=rows || constant.number+rows>(vertex?256u:224u))
                 throw std::invalid_argument("Unsupported tracked uniform extent: "+constant.name);
             const bool material_world_position=kind==TrackedUniformKind::material_camera &&
-                std::any_of(info.declarations.begin(),info.declarations.end(),[](const Declaration& d) {
-                    return d.type==1 && d.usage==5 && d.semantic==5;
-                });
+                native_material_offset;
             result.uniforms.push_back({vertex,constant.number,rows,next_row,kind,constant.matrix_class==3,
                 material_world_position});
             next_row+=rows;
@@ -136,19 +148,24 @@ inline TrackedPair track_uniforms(Pair pair) {
             append(program,canonical(headers));append(program,body);program.push_back(65535);
             continue;
         }
+        const auto free_samplers=info.free(10,vertex?4:16);
+        const bool constant_rows=!vertex && free_samplers.empty();
         const auto sampler=vertex && result.pair.view_texture?result.pair.sampler:
-            first(info.free(10,vertex?4:16),"No free tracked uniform texture sampler");
+            constant_rows?0:first(free_samplers,"No free tracked uniform texture sampler");
         if (vertex) {
             result.vertex_texture=true;
             result.pair.sampler=sampler;
-        } else result.pixel_sampler=static_cast<int>(sampler);
-        if (!vertex || !result.pair.view_texture)
+        } else if (!constant_rows) result.pixel_sampler=static_cast<int>(sampler);
+        if (!constant_rows && (!vertex || !result.pair.view_texture))
             op(headers,31,{0x90000000u,destination(10,sampler)});
-        const auto coordinate=first(info.free(2,vertex?256:224),"No free tracked texture coordinate constant");
-        info.used[2].set(coordinate);
-        op(headers,81,{destination(2,coordinate),
-            float_word(1.f/result.texture_width),float_word(.5f),
-            float_word((bindings.front()->texture_row+.5f)/result.texture_width),float_word(.25f)});
+        unsigned coordinate=0;
+        if (!constant_rows) {
+            coordinate=first(info.free(2,vertex?256:224),"No free tracked texture coordinate constant");
+            info.used[2].set(coordinate);
+            op(headers,81,{destination(2,coordinate),
+                float_word(1.f/result.texture_width),float_word(.5f),
+                float_word((bindings.front()->texture_row+.5f)/result.texture_width),float_word(.25f)});
+        }
         auto reserve_temp=[&](unsigned count) {
             for (unsigned start=0;start+count<=32;++start) {
                 bool available=true;
@@ -160,19 +177,12 @@ inline TrackedPair track_uniforms(Pair pair) {
             }
             throw std::invalid_argument("No contiguous temporaries for tracked uniform");
         };
-        const auto uv=reserve_temp(1);
+        const auto uv=constant_rows?0:reserve_temp(1);
         const TrackedUniform* material_camera=nullptr;
         for (const auto* binding:bindings)
             if (binding->kind==TrackedUniformKind::material_camera) material_camera=binding;
         if (material_camera) {
-            bool material_input=false;
-            for (const auto& declaration:info.declarations)
-                if (declaration.type==1 && declaration.usage==5 && declaration.semantic==5) {
-                    if (material_input || !(declaration.mask&7))
-                        throw std::invalid_argument("Material world-position varying is ambiguous");
-                    material_input=true;
-                }
-            if (!material_input && std::any_of(bindings.begin(),bindings.end(),
+            if (!material_camera->material_world_position && std::any_of(bindings.begin(),bindings.end(),
                 [](const TrackedUniform* b){return b->kind==TrackedUniformKind::material_projection;}))
                 throw std::invalid_argument("Material projection lacks its world-position varying");
         }
@@ -184,18 +194,33 @@ inline TrackedPair track_uniforms(Pair pair) {
                 eye=declaration.number;found=true;break;
             }
         if (!found) throw std::invalid_argument("Tracked shader has no paired eye input");
-        op(prefix,1,{destination(0,uv,1),source(2,coordinate,0xaa)});
-        op(prefix,4,{destination(0,uv,2),source(1,eye,vertex?0:result.pair.component*0x55),
-            source(2,coordinate,0x55),source(2,coordinate,0xff)});
-        op(prefix,2,{destination(0,uv,12),source(2,coordinate),source(2,coordinate)|0x01000000u});
+        if (!constant_rows) {
+            op(prefix,1,{destination(0,uv,1),source(2,coordinate,0xaa)});
+            op(prefix,4,{destination(0,uv,2),source(1,eye,vertex?0:result.pair.component*0x55),
+                source(2,coordinate,0x55),source(2,coordinate,0xff)});
+            op(prefix,2,{destination(0,uv,12),source(2,coordinate),source(2,coordinate)|0x01000000u});
+        }
         for (const auto* binding:bindings) {
             const auto temporary=reserve_temp(binding->rows);
             for (unsigned row=0;row<binding->rows;++row) {
                 if (mapping[binding->original_register+row]>=0)
                     throw std::invalid_argument("Tracked uniform register ranges overlap");
                 mapping[binding->original_register+row]=static_cast<int>(temporary+row);
-                op(prefix,vertex?95:66,{destination(0,temporary+row),source(0,uv),source(10,sampler)});
-                op(prefix,2,{destination(0,uv,1),source(0,uv,0),source(2,coordinate,0)});
+                if (constant_rows) {
+                    const auto left=first(info.free(2,224),"No free left-eye tracked constant");
+                    info.used[2].set(left);
+                    const auto right=first(info.free(2,224),"No free right-eye tracked constant");
+                    info.used[2].set(right);
+                    result.pixel_constant_rows.push_back({binding->texture_row+row,left,right});
+                    op(prefix,1,{destination(0,temporary+row),source(2,left)});
+                    op(prefix,2,{destination(0,temporary+row),source(2,right),
+                        source(0,temporary+row)|0x01000000u});
+                    op(prefix,4,{destination(0,temporary+row),
+                        source(1,eye,result.pair.component*0x55),source(0,temporary+row),source(2,left)});
+                } else {
+                    op(prefix,vertex?95:66,{destination(0,temporary+row),source(0,uv),source(10,sampler)});
+                    op(prefix,2,{destination(0,uv,1),source(0,uv,0),source(2,coordinate,0)});
+                }
             }
         }
         const Words wrapped{vertex?0xfffe0300u:0xffff0300u};

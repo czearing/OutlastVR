@@ -160,6 +160,10 @@ IDirect3DStateBlock9& D3D9StereoPipeline::prepare_caller_state() {
         if (entry.second>=224) throw std::invalid_argument("Invalid atlas caller-state constant mask");
         pixel_constants.push_back(entry.second);
     }
+    for (const auto& row:shaders_.pixel_constant_rows) {
+        constant(pixel_constants,row.left,224);
+        constant(pixel_constants,row.right,224);
+    }
     if (shaders_.vertex_texture) samplers.push_back(D3DVERTEXTEXTURESAMPLER0+shaders_.vertex_sampler);
     if (shaders_.pixel_view_sampler>=0) samplers.push_back(UINT(shaders_.pixel_view_sampler));
     for (const auto& entry:shaders_.atlas_point_samplers) samplers.push_back(entry.second);
@@ -666,6 +670,15 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
     gpu_check(device_->SetStreamSource(eye_stream, eyes_.get(), 0, sizeof(float)), "Bind paired eye stream");
     gpu_check(device_->SetVertexShader(vertex_.get()), "Bind stereo vertex shader");
     gpu_check(device_->SetPixelShader(pixel_.get()), "Bind stereo pixel shader");
+    for (const auto& row:shaders_.pixel_constant_rows) {
+        if (row.texture_row>=shaders_.view_texture_width || row.left>=224 || row.right>=224)
+            throw std::invalid_argument("Invalid sampler-saturated material constant binding");
+        gpu_check(device_->SetPixelShaderConstantF(row.left,records.data()+row.texture_row*4,1),
+            "Bind left-eye material constant without consuming a texture sampler");
+        gpu_check(device_->SetPixelShaderConstantF(row.right,
+            records.data()+(shaders_.view_texture_width+row.texture_row)*4,1),
+            "Bind right-eye material constant without consuming a texture sampler");
+    }
     std::array<UINT,2> view_samplers{};
     unsigned view_sampler_count=0;
     if (shaders_.vertex_texture) view_samplers[view_sampler_count++]=D3DVERTEXTEXTURESAMPLER0+shaders_.vertex_sampler;

@@ -22,6 +22,8 @@ foreach(name IN ITEMS
 endforeach()
 add_test(NAME test_native_hidden_bones COMMAND test_outlast_body_lifecycle --hidden-bones)
 set_tests_properties(test_native_hidden_bones PROPERTIES LABELS "cpu" TIMEOUT 120)
+add_test(NAME test_passive_hud_safe_area COMMAND test_headlocked_ui --hud-safe-area)
+set_tests_properties(test_passive_hud_safe_area PROPERTIES LABELS "cpu" TIMEOUT 120)
 foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery snap-recovery)
     string(REPLACE "-" "_" test_mode "${mode}")
     add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})
@@ -62,7 +64,15 @@ if(OLVR_GPU_TESTS)
     set_tests_properties(test_runtime_gpu_adapter PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME test_material_camera_precision COMMAND test_tracked_uniforms --material-large-origin)
     add_test(NAME test_material_world_position COMMAND test_tracked_uniforms --material-world-position)
+    add_test(NAME test_material_world_position_native COMMAND test_tracked_uniforms --material-world-position-native)
+    add_test(NAME test_material_world_position_precision COMMAND test_tracked_uniforms --material-world-position-large-origin)
+    add_test(NAME test_material_alternate_varying COMMAND test_tracked_uniforms --material-alternate-varying)
+    add_test(NAME test_material_full_samplers COMMAND test_tracked_uniforms --material-full-samplers)
+    add_test(NAME test_material_camera_projection COMMAND test_tracked_uniforms --material-camera-only-projection)
     set_tests_properties(test_material_camera_precision test_material_world_position
+        test_material_world_position_native test_material_world_position_precision
+        test_material_alternate_varying test_material_full_samplers
+        test_material_camera_projection
         PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     olvr_test(test_openxr_session)
     target_compile_definitions(test_openxr_session PRIVATE OLVR_ISOLATED_9ON12)

@@ -32,6 +32,27 @@ def fixture():
 
 
 class NativeCollectibleTests(unittest.TestCase):
+    def instant_fixture(self):
+        data = fixture()
+        data["observer"] = [r for r in data["observer"] if r["kind"] != "notify"]
+        data["observer"][1].update(basic=0, special=0, selected=0)
+        next(r for r in data["observer"] if r["kind"] == "collect")["clock_us"] = 1210
+        data["uses"][0].update(completed_instantly=True, special_after_completion=0,
+                              selected_after_completion=0, completion_begin_us=1205,
+                              completion_end_us=1220, body_after_completion=[0, 0, 0])
+        for row in data["fixtures"]:
+            row.update(grip=row["trigger"], trigger=0, route_version=6)
+        return data
+
+    def test_instant_native_completion_contract(self):
+        result = grade(self.instant_fixture())
+        self.assertTrue(result["completed_instantly"])
+        self.assertEqual(result["native_notify_calls"], 0)
+        self.assertEqual(result["continuation_input_samples"], 0)
+
+    def test_instant_corruption_controls(self):
+        self.assertEqual(len(reject_controls(self.instant_fixture())), 16)
+
     def test_genuine_collection_contract(self):
         result = grade(fixture())
         self.assertEqual(result["native_document_collections"], 1)

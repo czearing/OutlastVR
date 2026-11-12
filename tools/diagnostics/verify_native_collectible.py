@@ -55,6 +55,7 @@ def grade(data):
     starts = [r for r in uses if r["kind"] == "pickup" and r["action"] and r["result"]]
     require(len(starts) == 1, "Expected one successful native pickup start")
     start = starts[0]
+    instant = start.get("completed_instantly", False)
     require(start["hero"] == hero and start["selected_pickup"] == item and
             start["controller_aim"] and start["special"] == 49,
             "Actual document was not selected through scoped controller aim")
@@ -70,11 +71,21 @@ def grade(data):
     notify = [r for r in observer if r["kind"] == "notify" and r["hero"] == hero and
               r["selected_before"] == item and r["selected_after"] == item and
               r["special_before"] == 49 and r["special_after"] == 49]
-    require(notify and max(r["world"] for r in notify) < collected["world"],
-            "Missing native pickup animation notify before collection")
     relevant = [r for r in states if r["hero"] == hero and r["item"] == item]
-    require(any(r["basic"] == 2 and r["special"] == 49 and r["selected"] == item for r in relevant),
-            "Actual native pickup animation never acquired the document")
+    if instant:
+        require(start["special_after_completion"] == 0 and start["selected_after_completion"] == 0,
+                "Instant pickup did not finish its native special state and selection")
+        require(start["completion_begin_us"] <= collected["clock_us"] <= start["completion_end_us"],
+                "Document was not collected synchronously inside native pickup completion")
+        require(math.dist(start["body_origin"], start["body_after_completion"]) < .0001,
+                "Instant pickup moved the native actor")
+        require(not notify and all(r["special"] != 49 for r in relevant),
+                "Instant pickup left a native pickup animation running")
+    else:
+        require(notify and max(r["world"] for r in notify) < collected["world"],
+                "Missing native pickup animation notify before collection")
+        require(any(r["basic"] == 2 and r["special"] == 49 and r["selected"] == item for r in relevant),
+                "Actual native pickup animation never acquired the document")
     require(relevant[-1]["world"] >= 899 and relevant[-1]["basic"] == 0 and
             relevant[-1]["special"] == 0 and relevant[-1]["selected"] == 0 and relevant[-1]["flags"] & 1,
             "Document animation did not finish and return to ordinary native locomotion")
@@ -96,8 +107,12 @@ def grade(data):
         return frame["gameplay_frame"] if frame else None
 
     world = world_for_input(pad)
-    require(world in fixture_map and fixture_map[world]["trigger"] == 1,
+    require(world in fixture_map and fixture_map[world]["grip" if instant else "trigger"] == 1,
+            "Native pickup does not correspond to the recorded controller grip" if instant else
             "Native pickup does not correspond to the recorded controller trigger")
+    if instant:
+        require(fixture_map[world]["trigger"] == 0 and fixture_map[world]["route_version"] == 6,
+                "Instant pickup fixture used an index trigger or obsolete route")
     q = fixture_map[world]["aim"]
     local_direction = rotate(q, [0, 0, -1])
     sources = [r for r in bodies if r["hero"] == hero and r.get("targets") and
@@ -114,14 +129,17 @@ def grade(data):
         errors.append((math.dist(origin, start["origin"]), math.dist(direction, start["direction"])))
     require(any(position < .02 and direction < .0001 for position, direction in errors),
             "Native use ray disagrees with independent recorded controller/tracking reconstruction")
-    initial = next(r for r in relevant if r["basic"] == 2 and r["special"] == 49)
+    initial = (next(r for r in reversed(relevant) if r["world"] <= collected["world"]) if instant else
+               next(r for r in relevant if r["basic"] == 2 and r["special"] == 49))
     head_dot = sum(a*b for a, b in zip(initial["native_forward"], start["direction"]))
     require(head_dot < -.8, "Fixture did not distinguish controller-directed pickup from head gaze")
-    last_notify = max(r["world"] for r in notify)
-    continued = [r for r in pads if (w := world_for_input(r)) is not None and
-                 last_notify+100 <= w < last_notify+108 and r["buttons"] & 16384 and
-                 r["use_ready"] and r["focused"] and r["right_aim_tracked"]]
-    require(continued, "Fresh controller continuation was blocked during native document animation")
+    continued = []
+    if not instant:
+        last_notify = max(r["world"] for r in notify)
+        continued = [r for r in pads if (w := world_for_input(r)) is not None and
+                     last_notify+100 <= w < last_notify+108 and r["buttons"] & 16384 and
+                     r["use_ready"] and r["focused"] and r["right_aim_tracked"]]
+        require(continued, "Fresh controller continuation was blocked during native document animation")
     require({r["route_stage"] for r in fixtures} == {0, 1, 2, 3},
             "Controller-only fixture did not traverse the around-counter route")
     return dict(status="pass", hero=hero, item=item, tag=tag, native_document_collections=1,
@@ -130,6 +148,7 @@ def grade(data):
                 native_view_scopes_restored=len(uses), native_profile_arrays_updated=True,
                 native_hud_tag_updated=True, steam_disabled=True, returned_to_locomotion=True,
                 best_ray_errors=min(errors),
+                completed_instantly=instant,
                 limitations="Owned headset-free document fixture only; not arbitrary items/maps, "
                 "journal reading, physical hand ergonomics or headset FPS.")
 
@@ -151,6 +170,15 @@ def reject_controls(data):
         ("missing-native-flag", "observer", None, ("flags_after", 0)),
         ("expanded-range", "uses", None, ("native_horizontal_range", [0, 10000])),
     ]
+    instant = any(r.get("completed_instantly") for r in data["uses"])
+    if instant:
+        controls = [r for r in controls if r[0] not in ("missing-notify", "missing-continuation")]
+        controls += [
+            ("stale-selection", "uses", None, ("selected_after_completion", 2)),
+            ("deferred-collection", "observer", None, ("clock_us", 0)),
+            ("forced-movement", "uses", None, ("body_after_completion", [1000, 0, 0])),
+            ("wrong-grip", "fixtures", None, ("grip", 0)),
+        ]
     result = []
     for name, key, keep, change in controls:
         corrupted = dict(data)
@@ -190,7 +218,7 @@ def main():
     identity = json.loads((capture/"native-run-manifest.json").read_text(encoding="utf-8-sig"))
     digest = hashlib.sha256(args.module.read_bytes()).hexdigest().upper()
     require(digest == identity["mod_sha256"] and identity["collectible_fixture_version"] == 1 and
-            identity["collectible_path_fixture_version"] == 5, "Wrong native module or collectible fixture")
+            identity["collectible_path_fixture_version"] == 6, "Wrong native module or collectible fixture")
     data = {key: rows(capture/name) for key, name in (
         ("observer", "native-collectible-observer.jsonl"), ("uses", "native-use-events.jsonl"),
         ("fixtures", "native-collectible-fixture.jsonl"), ("pads", "native-input-events.jsonl"),
