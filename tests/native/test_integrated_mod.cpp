@@ -47,6 +47,9 @@ void* gamepad_data=native_gamepads.data();
 INT gamepad_count=4;
 XINPUT_STATE observed_gamepad{};
 unsigned motion_polls=0;
+void* observed_skeleton=nullptr;
+float observed_skeleton_elapsed=0,native_animation_time=0;
+UINT observed_skeleton_secondary=0;
 ViewportFocusEntry joystick_focus_site=nullptr;
 INT observed_joystick_focus=0;
 INT actual_viewport_focus=0;
@@ -159,7 +162,16 @@ NATIVE void WINAPI lean_tick_stub(void* node,float) {
     asm volatile("nop;nop;nop;nop;nop");
     write(node,0x140,native_lean_weight);
 }
-void* WINAPI hero_cast_stub(void* actor) {
+NATIVE void WINAPI skeleton_stub(void* component,float elapsed,UINT secondary) {
+    asm volatile("nop;nop;nop;nop;nop");
+    observed_skeleton=component;
+    observed_skeleton_elapsed=elapsed;
+    observed_skeleton_secondary=secondary;
+    native_animation_time+=elapsed;
+}
+NATIVE void* WINAPI hero_cast_stub(void* actor) {
+    // Native helper calls may overwrite volatile floating-point argument registers.
+    asm volatile("pxor %%xmm1, %%xmm1" ::: "xmm1");
     return actor==camera_hero.data()?actor:nullptr;
 }
 NATIVE int WINAPI sphere_stub(const void*,const float*,const float*) {asm volatile("nop;nop;nop;nop;nop");return 0;}
@@ -580,6 +592,7 @@ int main(int argc,char** argv) {
         config.bindings.camera_update=&camera_update_stub;
         config.bindings.lean_tick=&lean_tick_stub;
         config.bindings.hero_cast=&hero_cast_stub;
+        config.bindings.skeleton_evaluate=&skeleton_stub;
         config.bindings.input_tick=&input_tick_stub;
         config.bindings.gamepad_state=&gamepad_state_stub;
         config.bindings.gamepad_vibration=&gamepad_vibration_stub;
@@ -601,6 +614,22 @@ int main(int argc,char** argv) {
         if (mode=="--fault-crosshair") config.bindings.crosshair_update=nullptr;
         const auto initialized=init(&config);
         require(initialized==0,std::string("Integrated DLL initialization failed: ")+error());
+        std::array<unsigned char,0x400> skeleton{};
+        float expected_animation_time=0;
+        for (void* owner:{static_cast<void*>(nullptr),static_cast<void*>(camera_hero.data())}) {
+            write(skeleton.data(),0x78,owner);
+            for (const float elapsed:{1.f/60,.25f,0.f,1.f/30}) {
+                const UINT secondary=elapsed==0?0:1;
+                skeleton_stub(skeleton.data(),elapsed,secondary);
+                expected_animation_time+=elapsed;
+                require(observed_skeleton==skeleton.data() &&
+                    observed_skeleton_elapsed==elapsed && observed_skeleton_secondary==secondary &&
+                    native_animation_time==expected_animation_time,
+                    "Production skeleton hook corrupted native animation delta time or arguments");
+            }
+        }
+        std::cout<<"PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered; "
+            <<"positive_and_zero_time; original_secondary_preserved\n";
         actual_viewport_focus=1;
         require(joystick_focus_site(focus_viewport.data())==1,
             "Joystick focus hook changed an originally focused native viewport");

@@ -29,8 +29,8 @@ is available, press both secondary actions to pause.
   alignment still need playtesting.
 - Reported glass and security-office material artifacts have been corrected.
   Other scenes and scripted interactions still need playtesting.
-- The default night-vision filter does not use batteries or display the native
-  camera HUD.
+- Default night vision uses the game's original post-processing chain, without
+  battery tracking or the native camera HUD.
 - The physical camcorder has visibility issues and is disabled by default.
   Either holding hand and left-handed controls are supported by the experimental
   input/model paths, not yet accepted through headset playtesting. Keep

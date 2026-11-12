@@ -27,7 +27,7 @@
 #include "native_camcorder_probe.h"
 #include "outlast_config.h"
 #include "outlast_night_vision.h"
-#include "d3d9_night_vision.h"
+#include "d3d9_comfort_filter.h"
 #include "native_mono_resolve_probe.h"
 #include "d3d9_frame_profile.h"
 #include "native_draw_probe.h"
@@ -225,8 +225,8 @@ class Runtime {
     OutlastComfort comfort_;
     float vignette_strength_=0;
     OutlastNightVision night_vision_;
-    bool night_vision_enabled_=false;
-    std::unique_ptr<D3D9NightVision> night_vision_filter_;
+    bool night_effects_waiting_=false;
+    std::unique_ptr<D3D9ComfortFilter> comfort_filter_;
     using CamcorderRaise=UINT64(WINAPI*)(void*);
     using CamcorderLower=void(WINAPI*)(void*);
     using CamcorderNV=void(WINAPI*)(void*,INT);
@@ -382,6 +382,7 @@ class Runtime {
     std::mutex skeleton_mutex_;
     UINT64 skeleton_observations_=0;
     OutlastBodyIK body_ik_;
+    OutlastBodyIK shadow_ik_;
     float hand_wristward_m_=outlast_default_hand_wristward_m;
     std::array<bool,2> hand_reach_warned_{};
     struct BodyFrame {
@@ -638,7 +639,6 @@ class Runtime {
         QueryPerformanceCounter(&wait_start);
         if (!xr().begin_frame()) {
             motion_controls_.publish({},input_clock());
-            night_vision_.update({},false,input_clock());
             controller_menu_pointer(false,nullptr);
             std::lock_guard<std::mutex> lock(skeleton_mutex_);
             body_frame_.reset();
@@ -744,9 +744,6 @@ class Runtime {
         }
         ui_eyes_=menu_overlay_?panel_anchor_.locate_ui(tracked_,fovs_,float(width_)/height_):
             passive_hud_constants(tracked_,fovs_,float(width_)/height_);
-        if (!test_ && !config_.physical_camcorder)
-            night_vision_enabled_=night_vision_.update(motion,
-                !present_panel_ && !menu_overlay_,input_clock(),config_.comfort.primary_hand());
         return true;
     }
     void publish_body(TrackingFrame& tracking,const OutlastLocomotionView& view) {
@@ -1835,6 +1832,7 @@ class Runtime {
             const bool timed=headless_probe && r.probe_camera_updates_.is_open();
             const auto started=timed?r.input_clock():0;
             r.original_camera_update_(camera,elapsed);
+            r.update_native_night_vision(camera);
             const auto native_done=timed?r.input_clock():0;
             r.update_hand_collisions(camera);
             const auto collisions_done=timed?r.input_clock():0;
@@ -1863,6 +1861,45 @@ class Runtime {
             output<<"]}\n";output.flush();
             if (!output) throw std::runtime_error("Native final-camera evidence write failed");
         });
+    }
+    void update_native_night_vision(void* camera) {
+        if (test_ || config_.physical_camcorder || !motion_enabled_) return;
+        const auto thread=input_thread_.load(std::memory_order_acquire);
+        if (!thread) return;
+        if (thread!=GetCurrentThreadId())
+            throw std::runtime_error("Retail night vision requires the native gameplay thread");
+        auto* hero=hero_cast_(field<void*>(camera,0x60));
+        if (!hero) return;
+        const auto now=input_clock();
+        const auto motion=motion_controls_.sample(now);
+        auto* controller=field<void*>(hero,0x2bbc);
+        const bool available=controller && (field<UINT>(controller,0xa84)&2);
+        if (!available) {
+            night_vision_.update(motion,false,now,config_.comfort.primary_hand());
+            return;
+        }
+        auto* engine=camcorder_engine_?*camcorder_engine_:nullptr;
+        auto* effects=engine?field<void*>(engine,0xa74):nullptr;
+        if (!effects) {
+            night_vision_.update(motion,false,now,config_.comfort.primary_hand());
+            if (!night_effects_waiting_)
+                log("Night vision deferred until the native effect manager is available");
+            night_effects_waiting_=true;
+            return;
+        }
+        night_effects_waiting_=false;
+        const auto mode=field<BYTE>(effects,0x3b8);
+        if (mode>2) throw std::runtime_error("Unknown retail camera effect mode");
+        const bool allowed=!menu_state_() && !(field<UINT>(hero,0x2f88)&0x80000);
+        night_vision_.synchronize(mode==2);
+        const bool enabled=night_vision_.update(motion,allowed,now,config_.comfort.primary_hand());
+        if (enabled!=(mode==2)) {
+            outlast_native_night_lights({field<void*>(hero,0x2d40),field<void*>(hero,0x2d48),
+                field<void*>(hero,0x2d50)},enabled,enable_camera_component_);
+            outlast_native_night_effect(effects,enabled,field<BYTE>(hero,0x303e)==1,
+                original_nv_effect_,normal_camera_effect_,original_camera_effect_);
+            log(enabled?"Retail night vision enabled":"Retail night vision disabled");
+        }
     }
     static void WINAPI lean_tick(void* node,float elapsed) {
         guarded([&] {
@@ -2347,21 +2384,23 @@ class Runtime {
         out.flush();
         if (!out) throw std::runtime_error("Cannot retain actual retail camera skeletal placement");
     }
-    static void WINAPI skeleton_evaluate(void* component,UINT flags,UINT secondary) {
+    static void WINAPI skeleton_evaluate(void* component,float elapsed,UINT secondary) {
         const auto callsite=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
         guarded([&] {
             auto& r=self();
             DiagnosticScope diagnostic(r.skeleton_phase_,1);
             r.skeleton_heartbeat_.store(GetTickCount64(),std::memory_order_release);
             const auto owner=r.hero_cast_(field<void*>(component,0x78));
-            const bool owned=owner && component==field<void*>(owner,0x444) &&
-                field<void*>(component,0x238) && !field<void*>(component,0x33c);
+            const auto body_component=outlast_body_component(owner,component);
+            const bool owned=body_component.has_value();
+            const bool shadow=body_component==1;
+            auto& ik=shadow?r.shadow_ik_:r.body_ik_;
             bool restored=false;
             if (owned) {
                 std::lock_guard<std::mutex> lock(r.skeleton_mutex_);
-                restored=r.body_ik_.restore(component);
+                restored=ik.restore(component);
             }
-            r.original_skeleton_evaluate_(component,flags,secondary);
+            r.original_skeleton_evaluate_(component,elapsed,secondary);
             if (r.camcorder_mesh_ && r.camcorder_mesh_->owns(owner,component)) {
                 r.camcorder_mesh_->update_transform(outlast_skeleton(r.camcorder_mesh_->parent()));
                 r.sample_native_camcorder_skeleton(owner,component);
@@ -2371,10 +2410,11 @@ class Runtime {
             std::unique_lock<std::mutex> lock(r.skeleton_mutex_);
             // Recenter can publish a new generation during native evaluation.
             if (r.body_generation_!=r.calibrated_generation_) {
-                r.body_ik_.reset();r.calibrated_generation_=r.body_generation_;
+                r.body_ik_.reset();r.shadow_ik_.reset();
+                r.calibrated_generation_=r.body_generation_;
             }
             const auto now=r.input_clock();
-            const bool retain=r.probe_skeleton_.is_open() &&
+            const bool retain=!shadow && r.probe_skeleton_.is_open() &&
                 (r.probe_skeleton_all_ || r.skeleton_observations_<60 || (r.skeleton_observations_+1)%30==0);
             std::vector<BoneAtom> before;
             std::optional<BodyIKTargets> applied_targets;
@@ -2424,7 +2464,7 @@ class Runtime {
                                     targets.world_contact[hand]=true;
                                 }
                     }
-                    if (!r.body_ik_.owns(skeleton) && basic==0 && !special && !r.body_frame_->native.pawn_crouched) {
+                    if (!ik.owns(skeleton) && basic==0 && !special && !r.body_frame_->native.pawn_crouched) {
                         std::array<INT,20> bones{};
                         for (std::size_t i=0;i<bones.size();++i) {
                             UINT64 name=0;r.bone_name_(&name,outlast_rig_names[i],1);
@@ -2435,20 +2475,22 @@ class Runtime {
                             UINT64 name=0;r.bone_name_(&name,outlast_skinning_names[i],1);
                             skin_bones[i]=r.bone_index_(component,name);
                         }
-                        r.body_ik_.calibrate(skeleton,bones,targets,skin_bones);
-                        log("Native full-body rig calibrated from actual hero bone indices; component-space IK enabled");
+                        ik.calibrate(skeleton,bones,targets,skin_bones);
+                        log(std::string("Native ")+(shadow?"shadow":"visible")+
+                            " full-body rig calibrated from actual hero bone indices; component-space IK enabled");
                     }
-                    if (r.body_ik_.owns(skeleton)) {
-                        if (r.camcorder_mesh_ && r.camcorder_mesh_->parent()==component &&
+                    if (ik.owns(skeleton)) {
+                        if (r.camcorder_mesh_ &&
+                            r.camcorder_mesh_->parent()==field<void*>(owner,0x444) &&
                             r.camcorder_mesh_->hand()>=0 && targets.tracked[r.camcorder_mesh_->hand()]) {
                             camcorder_hand=r.camcorder_mesh_->hand();
                             targets.mirror_camera_grip=camcorder_hand==0;
                             targets.controller_camera_grip[camcorder_hand]=true;
-                            r.camcorder_mesh_->update_held_tracking(frame,r.body_frame_->motion);
+                            if (!shadow) r.camcorder_mesh_->update_held_tracking(frame,r.body_frame_->motion);
                         }
                         if (retain) {before=skeleton.atoms;applied_targets=targets;}
-                        solved=r.body_ik_.apply(skeleton,targets);
-                        for (unsigned side=0;side<2;++side) {
+                        solved=ik.apply(skeleton,targets);
+                        for (unsigned side=0;!shadow && side<2;++side) {
                             const bool limited=targets.tracked[side] && solved->hand_target_error[side]>.03f;
                             if (limited && !r.hand_reach_warned_[side])
                                 log("Tracked hand exceeds bounded shoulder/arm reach; side="+std::to_string(side)+
@@ -2459,6 +2501,7 @@ class Runtime {
                     }
                 }
             }
+            if (shadow) return;
             if (r.probe_draw_contact_ || r.probe_draw_jump_) {
                 const bool tracked=solved && solved->solved_hands==2 && applied_targets &&
                     applied_targets->tracked[0] && applied_targets->tracked[1];
@@ -2504,6 +2547,7 @@ class Runtime {
                 <<",\"motion_focused_at_ik\":"<<(body_current?(motion_focused?"true":"false"):"null")
                 <<",\"thread\":"<<GetCurrentThreadId()<<",\"component\":"<<reinterpret_cast<std::uintptr_t>(component)
                 <<",\"asset\":"<<reinterpret_cast<std::uintptr_t>(skeleton.asset)
+                <<",\"native_elapsed\":"<<elapsed
                 <<",\"hero\":"<<reinterpret_cast<std::uintptr_t>(owner)
                 <<",\"basic\":"<<unsigned(field<BYTE>(owner,0x7bc))
                 <<",\"special\":"<<unsigned(field<BYTE>(owner,0x7bd))
@@ -3775,11 +3819,10 @@ class Runtime {
                     r.last_present_panel_=r.present_panel_;
                 }
                 r.compose_camcorder();
-                if (!r.present_panel_ && !r.menu_overlay_ &&
-                    (r.night_vision_enabled_ || r.vignette_strength_>0)) {
-                    if (!r.night_vision_filter_)
-                        r.night_vision_filter_=std::make_unique<D3D9NightVision>(*d);
-                    r.night_vision_filter_->draw(*r.final_surface_.get(),r.night_vision_enabled_,r.vignette_strength_);
+                if (!r.present_panel_ && !r.menu_overlay_ && r.vignette_strength_>0) {
+                    if (!r.comfort_filter_)
+                        r.comfort_filter_=std::make_unique<D3D9ComfortFilter>(*d);
+                    r.comfort_filter_->draw(*r.final_surface_.get(),r.vignette_strength_);
                 }
                 const bool direct=!r.present_panel_ && r.width_==r.xr().width() && r.height_==r.xr().height();
                 if (!direct && !r.submission_.get()) {
@@ -3849,7 +3892,7 @@ class Runtime {
             r.performance_=PerformanceBatch{};
             r.panel_renderer_.reset();
             r.camcorder_renderer_.reset();
-            r.night_vision_filter_.reset();
+            r.comfort_filter_.reset();
             r.camcorder_world_depth_.reset();
             if (r.camcorder_capture_) r.camcorder_capture_->release_device_resources();
             if (r.camcorder_probe_) r.camcorder_probe_->release_device_resources();
@@ -3883,6 +3926,8 @@ class Runtime {
         hooks_->add(bindings.camera_update,&camera_update,original_camera_update_);
         hooks_->add(bindings.lean_tick,&lean_tick,original_lean_tick_);
         hero_cast_=bindings.hero_cast;
+        if (bindings.skeleton_evaluate)
+            hooks_->add(bindings.skeleton_evaluate,&skeleton_evaluate,original_skeleton_evaluate_);
         if (bindings.viewport_focus)
             hooks_->add(bindings.viewport_focus,&viewport_focus,original_viewport_focus_);
         if (bindings.input_tick || bindings.gamepad_state || bindings.gamepad_vibration) {
@@ -3986,7 +4031,7 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=10 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=11 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;
@@ -4370,8 +4415,16 @@ public:
                     hooks_->add(retail_entry<CollectGarbage>(image,0xf8d90),
                         &collect_garbage,original_collect_garbage_);
                 }
-                if (!physical_camcorder)
-                    log("Simple full-view night-vision filter: right thumbstick click; physical camcorder disabled");
+                if (!physical_camcorder && motion_enabled_) {
+                    if (module_extent_<0x2020f40)
+                        throw std::runtime_error("Retail night-vision engine lies outside the exact image");
+                    camcorder_engine_=reinterpret_cast<void**>(base_+0x2020f38);
+                    original_nv_effect_=retail_entry<CamcorderNV>(image,0xd5b010);
+                    enable_camera_component_=retail_entry<CamcorderEnable>(image,0x1d8570);
+                    normal_camera_effect_=retail_entry<CamcorderLower>(image,0xd5b350);
+                    original_camera_effect_=retail_entry<CamcorderLower>(image,0xd5b710);
+                    log("Retail full-view night vision: right thumbstick click; original postprocess chain");
+                }
                 if (motion_enabled_) {
                     native_string_copy_=retail_entry<NativeHintFormat>(image,0xf370);
                     hooks_->add(retail_entry<NativeHintFormat>(image,0xd8bf90),

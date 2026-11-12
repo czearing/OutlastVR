@@ -1,5 +1,6 @@
 #pragma once
 #include "openxr_motion_input.h"
+#include <algorithm>
 
 namespace olvr {
 
@@ -7,6 +8,7 @@ class OutlastNightVision {
     bool enabled_=false,blocked_=true,down_=false;
     UINT64 clock_=0;
 public:
+    void synchronize(bool enabled) noexcept {enabled_=enabled;}
     bool update(const MotionFrame& motion,bool gameplay,UINT64 now,unsigned hand=1) {
         if (hand>=2) throw std::invalid_argument("Invalid night-vision hand");
         const bool current=motion.focused && motion.hands[hand].grip_tracked &&
@@ -20,5 +22,23 @@ public:
         return enabled_;
     }
 };
+
+using OutlastNightEffect=void(WINAPI*)(void*,INT);
+using OutlastCameraEffect=void(WINAPI*)(void*);
+using OutlastNightLight=void(WINAPI*)(void*,UINT);
+inline void outlast_native_night_lights(const std::array<void*,3>& lights,bool enabled,
+    OutlastNightLight activate) {
+    if (!activate || std::any_of(lights.begin(),lights.end(),[](void* light) {return !light;}))
+        throw std::invalid_argument("Missing retail night-vision light binding");
+    for (unsigned i=0;i<lights.size();++i)
+        activate(lights[i],enabled?(i==0):(i==2));
+}
+inline void outlast_native_night_effect(void* effects,bool enabled,bool camera_raised,
+    OutlastNightEffect night,OutlastCameraEffect normal,OutlastCameraEffect camera) {
+    if (!effects || !night || !normal || !camera)
+        throw std::invalid_argument("Missing retail night-vision effect binding");
+    if (enabled) night(effects,1);
+    else (camera_raised?camera:normal)(effects);
+}
 
 }

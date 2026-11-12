@@ -38,6 +38,39 @@ int main() {
         motion.hands[1].stick_click=true;
         require(filter.update(motion,true,505000));
         require(filter.update(motion,true,1));
+        filter.synchronize(false);
+        require(!filter.update(motion,true,2000));
+        motion.hands[1].stick_click=false;
+        require(!filter.update(motion,true,3000));
+        motion.hands[1].stick_click=true;
+        require(filter.update(motion,true,4000));
+        struct NativeEffects {unsigned mode=0;INT powered=0;} effects;
+        const auto native_night=+[](void* object,INT powered) {
+            auto& target=*static_cast<NativeEffects*>(object);
+            target.mode=2;target.powered=powered;
+        };
+        const auto native_normal=+[](void* object) {static_cast<NativeEffects*>(object)->mode=0;};
+        const auto native_camera=+[](void* object) {static_cast<NativeEffects*>(object)->mode=1;};
+        outlast_native_night_effect(&effects,true,false,native_night,native_normal,native_camera);
+        require(effects.mode==2 && effects.powered==1);
+        outlast_native_night_effect(&effects,false,false,native_night,native_normal,native_camera);
+        require(effects.mode==0);
+        outlast_native_night_effect(&effects,false,true,native_night,native_normal,native_camera);
+        require(effects.mode==1);
+        std::array<UINT,3> lights{2,2,2};
+        const auto light_switch=+[](void* light,UINT active) {*static_cast<UINT*>(light)=active;};
+        outlast_native_night_lights({&lights[0],&lights[1],&lights[2]},true,light_switch);
+        require(lights==std::array<UINT,3>{1,0,0});
+        outlast_native_night_lights({&lights[0],&lights[1],&lights[2]},false,light_switch);
+        require(lights==std::array<UINT,3>{0,0,1});
+        bool light_rejected=false;
+        try {outlast_native_night_lights({&lights[0],nullptr,&lights[2]},true,light_switch);}
+        catch (const std::invalid_argument&) {light_rejected=true;}
+        require(light_rejected && lights==std::array<UINT,3>{0,0,1});
+        bool rejected=false;
+        try {outlast_native_night_effect(nullptr,true,false,native_night,native_normal,native_camera);}
+        catch (const std::invalid_argument&) {rejected=true;}
+        require(rejected);
         OutlastMotionControls controls;
         controls.publish(motion,1000);
         XINPUT_STATE output{},physical{};
@@ -48,6 +81,6 @@ int main() {
         physical.Gamepad.wButtons=XINPUT_GAMEPAD_RIGHT_THUMB;
         controls.state(0,&output,ERROR_SUCCESS,physical,1003,false,true,false);
         require((output.Gamepad.wButtons&XINPUT_GAMEPAD_RIGHT_THUMB)!=0);
-        std::cout<<"PASS: thumbstick edge toggles, menu/focus/tracking/stale input isolation and experimental native routing\n";
+        std::cout<<"PASS: native night/camera/normal effect dispatch; stock-state synchronization; thumbstick focus/tracking/menu isolation\n";
     } catch (const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
 }

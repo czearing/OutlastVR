@@ -2,6 +2,7 @@
 #include "d3d9_resource.h"
 #include "xr_view_constants.h"
 #include "outlast_config.h"
+#include "outlast_skeleton.h"
 #include <cstdint>
 #include <xinput.h>
 #define XR_USE_PLATFORM_WIN32
@@ -61,11 +62,12 @@ struct RuntimeBindings {
     GamepadVibrationEntry gamepad_vibration=nullptr;
     ViewportFocusEntry viewport_focus=nullptr;
     TranslucencyBoundsEntry translucency_bounds=nullptr;
+    SkeletonEvaluateEntry skeleton_evaluate=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=10;
+    UINT version=11;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};

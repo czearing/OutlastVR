@@ -6,7 +6,7 @@
 
 namespace olvr {
 
-class D3D9NightVision {
+class D3D9ComfortFilter {
     IDirect3DDevice9& device_;
     D3D9StateCache state_;
     Com<IDirect3DPixelShader9> shader_;
@@ -15,36 +15,33 @@ class D3D9NightVision {
     UINT width_=0,height_=0;
     D3DFORMAT format_=D3DFMT_UNKNOWN;
 public:
-    explicit D3D9NightVision(IDirect3DDevice9& device):device_(device) {
+    explicit D3D9ComfortFilter(IDirect3DDevice9& device):device_(device) {
         const char* text=R"(
             sampler Source:register(s0);
             float4 Options:register(c0);
             float4 main(float2 uv:TEXCOORD0):COLOR {
                 float4 image=tex2D(Source,uv);
-                float luminance=dot(image.rgb,float3(.2126,.7152,.0722));
-                float green=pow(saturate(luminance*1.6),.65);
-                if (Options.x>.5) image.rgb=float3(.12,1,.22)*green;
                 float2 eye=float2(frac(uv.x*2),uv.y)*2-1;
                 image.rgb*=1-Options.y*smoothstep(.55,1,length(eye));
                 return image;
             })";
         Com<ID3DBlob> code,errors;
-        const auto status=D3DCompile(text,std::strlen(text),"night-vision-filter",nullptr,nullptr,
+        const auto status=D3DCompile(text,std::strlen(text),"comfort-vignette",nullptr,nullptr,
             "main","ps_3_0",D3DCOMPILE_ENABLE_STRICTNESS,0,code.put(),errors.put());
         if (FAILED(status)) throw std::runtime_error(errors.get()?
             std::string(static_cast<const char*>(errors->GetBufferPointer()),errors->GetBufferSize()):
-            "Cannot compile night-vision filter");
+            "Cannot compile comfort vignette");
         gpu_check(device_.CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()),shader_.put()),
-            "Create night-vision filter");
+            "Create comfort vignette");
     }
-    void draw(IDirect3DSurface9& output,bool night_vision=true,float vignette=0) {
+    void draw(IDirect3DSurface9& output,float vignette) {
         if (!std::isfinite(vignette) || vignette<0 || vignette>1)
             throw std::invalid_argument("Vignette strength must be 0..1");
         D3DSURFACE_DESC description{};
-        gpu_check(output.GetDesc(&description),"Read night-vision target");
+        gpu_check(output.GetDesc(&description),"Read comfort vignette target");
         if (!description.Width || description.Width%2 || !description.Height ||
             description.MultiSampleType!=D3DMULTISAMPLE_NONE)
-            throw std::invalid_argument("Night-vision requires a non-MSAA two-eye atlas");
+            throw std::invalid_argument("Comfort vignette requires a non-MSAA two-eye atlas");
         if (width_!=description.Width || height_!=description.Height || format_!=description.Format) {
             surface_.reset();source_.reset();
             gpu_check(device_.CreateTexture(description.Width,description.Height,1,D3DUSAGE_RENDERTARGET,
@@ -87,8 +84,8 @@ public:
                 {D3DRS_FILLMODE,D3DFILL_SOLID},{D3DRS_COLORWRITEENABLE,15},{D3DRS_SRGBWRITEENABLE,FALSE}})
                 gpu_check(device_.SetRenderState(setting.first,setting.second),"Set isolated filter state");
             gpu_check(device_.SetVertexShader(nullptr),"Use transformed filter quad");
-            gpu_check(device_.SetPixelShader(shader_.get()),"Bind night-vision filter");
-            const float options[]{night_vision?1.f:0.f,vignette,0,0};
+            gpu_check(device_.SetPixelShader(shader_.get()),"Bind comfort vignette");
+            const float options[]{0,vignette,0,0};
             gpu_check(device_.SetPixelShaderConstantF(0,options,1),"Set stereo comfort filter options");
             gpu_check(device_.SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1),"Set filter vertex format");
             gpu_check(device_.SetTexture(0,source_.get()),"Bind completed stereo input");

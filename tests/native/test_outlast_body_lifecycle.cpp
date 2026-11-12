@@ -81,6 +81,47 @@ struct Fixture {
         return rig;
     }
 };
+void shadow_lifecycle() {
+    Fixture visible,shadow,npc;
+    std::array<unsigned char,0x2d00> hero{};
+    write(hero.data(),0x444,visible.component.data());
+    write(hero.data(),0x2ce0,shadow.component.data());
+    require(outlast_body_component(hero.data(),visible.component.data())==0,
+        "Visible hero lost tracked-pose ownership");
+    require(outlast_body_component(hero.data(),shadow.component.data())==1,
+        "Native shadow mesh is excluded from the tracked pose");
+    require(!outlast_body_component(hero.data(),npc.component.data()),
+        "NPC skeleton was mistaken for a tracked hero mesh");
+    for (unsigned frame=0;frame<48;++frame) {
+        for (auto* fixture:{&visible,&shadow}) {
+            fixture->current=fixture->native;
+            fixture->targets.head.position={.03f+.02f*std::sin(float(frame)),0,0};
+            fixture->targets.hands[0].position={-.42f,-.2f,-.3f};
+            fixture->targets.hands[1].position={.42f,-.25f,-.3f};
+            fixture->targets.tracked={frame%3!=0,frame%4!=0};
+            const auto solved=fixture->solve();
+            std::memcpy(fixture->current.data(),solved.atoms.data(),solved.atoms.size()*sizeof(BoneAtom));
+        }
+        for (unsigned bone=0;bone<visible.current.size();++bone)
+            require(equal(visible.current[bone],shadow.current[bone]),
+                "Visible and shadow bones diverged with identical native rigs and controller goals");
+        require(shadow.ik.restore(shadow.component.data()),
+            "Shadow pose could not restore its own native animation");
+        require(std::memcmp(shadow.current.data(),shadow.native.data(),
+            shadow.native.size()*sizeof(BoneAtom))==0,"Shadow restoration retained tracked feedback");
+        require(visible.ik.restore(visible.component.data()),
+            "Restoring the shadow consumed the visible mesh's pose cache");
+        require(std::memcmp(npc.current.data(),npc.native.data(),
+            npc.native.size()*sizeof(BoneAtom))==0,"Tracked shadow update changed an NPC");
+    }
+    write(shadow.component.data(),0x33c,visible.component.data());
+    require(!outlast_body_component(hero.data(),shadow.component.data()),
+        "Parent-animated shadow was treated as an independent local skeleton");
+    write(shadow.component.data(),0x33c,static_cast<void*>(nullptr));
+    write(shadow.component.data(),0x238,static_cast<void*>(nullptr));
+    require(!outlast_body_component(hero.data(),shadow.component.data()),
+        "Uninitialized shadow mesh was accepted for tracked IK");
+}
 void hand_orientation(bool visibility=false) {
     std::array<unsigned char,0x400> component{},asset{};
     std::array<unsigned char,33*0x50> reference{};
@@ -199,8 +240,10 @@ int main(int argc,char** argv) {
     try {
         const std::string mode=argc==2?argv[1]:"";
         require(argc<=2 && (mode.empty() || mode=="--partial-animation" || mode=="--crouch-cycles" ||
-            mode=="--hand-orientation" || mode=="--hidden-bones" || mode=="--fault-native-crouch"),
+            mode=="--hand-orientation" || mode=="--hidden-bones" || mode=="--shadow-pose" ||
+            mode=="--fault-native-crouch"),
             "Unknown lifecycle test mode");
+        if (mode.empty() || mode=="--shadow-pose") shadow_lifecycle();
         if (mode.empty() || mode=="--hand-orientation") hand_orientation();
         if (mode.empty() || mode=="--hidden-bones") {
             hand_orientation(true);

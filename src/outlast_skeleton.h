@@ -2,6 +2,7 @@
 #include "xr_view_constants.h"
 #include <vector>
 #include <cstring>
+#include <optional>
 
 namespace olvr {
 struct BoneAtom {
@@ -10,7 +11,8 @@ struct BoneAtom {
     float scale;
 };
 static_assert(sizeof(BoneAtom)==0x20);
-using SkeletonEvaluateEntry=void(WINAPI*)(void*,UINT,UINT);
+// Retail UpdateSkelPose reads its frame time from XMM1, not EDX.
+using SkeletonEvaluateEntry=void(WINAPI*)(void*,float,UINT);
 using BoneNameEntry=void*(WINAPI*)(void*,const wchar_t*,INT);
 using BoneIndexEntry=INT(WINAPI*)(void*,UINT64);
 using BoneMatrixEntry=void(WINAPI*)(void*,float*,INT);
@@ -28,6 +30,13 @@ template<class T> T skeleton_field(const void* object,std::size_t offset) {
     T result{};
     std::memcpy(&result,static_cast<const unsigned char*>(object)+offset,sizeof(result));
     return result;
+}
+inline std::optional<unsigned> outlast_body_component(const void* hero,const void* component) {
+    if (!hero || !component || !skeleton_field<void*>(component,0x238) ||
+        skeleton_field<void*>(component,0x33c)) return std::nullopt;
+    if (component==skeleton_field<void*>(hero,0x444)) return 0;
+    if (component==skeleton_field<void*>(hero,0x2ce0)) return 1;
+    return std::nullopt;
 }
 inline NativeSkeleton outlast_skeleton(void* component) {
     NativeSkeleton result{};

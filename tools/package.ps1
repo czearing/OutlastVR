@@ -31,7 +31,7 @@ if (@(Compare-Object ($expected | Sort-Object) ($relative | Sort-Object)).Count)
     throw "Package contains missing or unexpected files: $($relative -join ', ')"
 }
 if ((Get-Content -LiteralPath (Join-Path $stage 'OutlastVR.ini') -Raw) -notmatch '(?m)^physical_camcorder=false\r?$') {
-    throw 'Release must default to the simple night-vision filter'
+    throw 'Release must default to native full-view night vision'
 }
 $manifest = [ordered]@{
     name = 'Outlast VR'
