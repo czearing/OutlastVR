@@ -81,12 +81,69 @@ struct Fixture {
         return rig;
     }
 };
+void hand_orientation() {
+    std::array<unsigned char,0x400> component{},asset{};
+    std::array<unsigned char,33*0x50> reference{};
+    std::vector<BoneAtom> atoms(33,BoneAtom{{0,0,0,1},{0,0,0},1});
+    const std::array<Vec3,5> roots{{{2,0,-5},{9,0,-3},{10,0,-1},{9,0,1},{8,0,3}}};
+    for (unsigned side=0;side<2;++side) {
+        const INT wrist=side?17:1;
+        write(reference.data(),std::size_t(wrist)*0x50+0x40,INT(0));
+        for (unsigned finger=0;finger<5;++finger) for (unsigned joint=0;joint<3;++joint) {
+            const INT index=wrist+INT(finger*3+joint)+1;
+            auto position=joint?Vec3{3,0,0}:roots[finger];
+            if (side) position.z=-position.z;
+            write(reference.data(),std::size_t(index)*0x50+0x40,joint?index-1:wrist);
+            write(reference.data(),std::size_t(index)*0x50+0x20,position);
+            write(reference.data(),std::size_t(index)*0x50+0x10,Quaternion{0,0,0,1});
+        }
+    }
+    write(asset.data(),0xc4,reference.data());write(asset.data(),0xcc,INT(atoms.size()));
+    write(component.data(),0x238,asset.data());
+    write(component.data(),0x2d8,atoms.data());write(component.data(),0x2e0,INT(atoms.size()));
+    const std::array<float,16> world{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    write(component.data(),0xc0,world);
+    const auto source=outlast_skeleton(component.data());
+    NativeControllerFingers fingers(source,1,17);
+    const TrackingFrame tracking{{0,0,0},{0,1,0},{0,0,1},{-1,0,0},100,{}};
+    for (unsigned frame=0;frame<48;++frame) {
+        const float angle=float(frame)*.130899694f;
+        const auto axis=bone_unit(Vec3{1,2,-3});
+        const auto vector=scale(axis,std::sin(angle*.5f));
+        const Quaternion grip{vector.x,vector.y,vector.z,std::cos(angle*.5f)};
+        const auto right=map_tracking(tracking,rotate(grip,{1,0,0}));
+        const auto wristward=map_tracking(tracking,rotate(grip,{0,1,0}));
+        for (unsigned side=0;side<2;++side) {
+            const INT wrist=side?17:1;
+            const auto anchor=outlast_grip_anchor(source,wrist);
+            auto rig=source;
+            rig.atoms[std::size_t(wrist)].rotation=
+                outlast_grip_wrist_rotation(rig,tracking,grip,anchor);
+            fingers.apply(rig,source.atoms,side,0,0,false);
+            const auto open=rig;
+            Vec3 knuckles{};
+            for (unsigned finger=1;finger<5;++finger)
+                knuckles=add(knuckles,scale(rig.atoms[std::size_t(wrist)+finger*3+1].position,.25f));
+            require(dot(bone_unit(knuckles),wristward)<-.98f,
+                "Open native hand faces wristward instead of toward the fingertips");
+            fingers.apply(rig,source.atoms,side,.1f,.1f,false);
+            for (unsigned finger=1;finger<5;++finger) {
+                const auto tip=std::size_t(wrist)+finger*3+3;
+                const auto bend=add(rig.atoms[tip].position,scale(open.atoms[tip].position,-1));
+                require(dot(bend,right)*(side?-1.f:1.f)>.03f,
+                    "Native finger starts curling onto the back of the hand");
+            }
+        }
+    }
+}
 }
 int main(int argc,char** argv) {
     try {
         const std::string mode=argc==2?argv[1]:"";
-        require(argc<=2 && (mode.empty() || mode=="--partial-animation" || mode=="--crouch-cycles"),
+        require(argc<=2 && (mode.empty() || mode=="--partial-animation" || mode=="--crouch-cycles" ||
+            mode=="--hand-orientation"),
             "Unknown lifecycle test mode");
+        if (mode.empty() || mode=="--hand-orientation") hand_orientation();
         if (mode.empty() || mode=="--partial-animation") {
             Fixture f;
             f.targets.head.position={.03f,-.2f,.02f};

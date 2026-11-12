@@ -29,7 +29,8 @@ int main(int argc,char** argv) {
             (argc==2 && std::string(argv[1])=="--material-camera-only");
         const bool material_columns=argc==2 && std::string(argv[1])=="--material-native-columns";
         const bool material_origin=argc==2 && std::string(argv[1])=="--material-large-origin";
-        const bool material=material_fault || material_columns || material_origin || camera_only ||
+        const bool material_world=argc==2 && std::string(argv[1])=="--material-world-position";
+        const bool material=material_fault || material_columns || material_origin || camera_only || material_world ||
             (argc==2 && std::string(argv[1])=="--material-projection");
         const bool motion_fault=argc==2 && std::string(argv[1])=="--fault-motion-policy";
         const bool motion=motion_fault || (argc==2 && std::string(argv[1])=="--motion-policy");
@@ -111,6 +112,10 @@ int main(int argc,char** argv) {
 #if MATERIAL_TEST
                 float4 projected=MUL_NATIVE(ViewProjectionMatrix,materialWorld);
                 float3 absolute=materialWorld.xyz+CameraWorldPos.xyz;
+#if MATERIAL_WORLD_TEST
+                return float4(projected.x/projected.w*.2+.5,absolute.z*.005+.5,
+                    materialWorld.x*.005+.5,CameraWorldPos.w/128);
+#endif
                 return float4(projected.xy/projected.w*.2+.5,absolute.z*.005+.5,CameraWorldPos.w/128);
 #endif
                 float2 clip=float2(pixel.x*Parameters.x*2-1,1-(pixel.y-BandOffset)*Parameters.y*2);
@@ -142,6 +147,7 @@ int main(int argc,char** argv) {
             (material_origin?"#define MATERIAL_DEPTH .25\n":"#define MATERIAL_DEPTH 25\n")+
             (native_translated?"#define TRANSLATED_NATIVE 1\n":"#define TRANSLATED_NATIVE 0\n")+
             (material?"#define MATERIAL_TEST 1\n":"#define MATERIAL_TEST 0\n")+
+            (material_world?"#define MATERIAL_WORLD_TEST 1\n":"#define MATERIAL_WORLD_TEST 0\n")+
             (camera_only?"#define MATERIAL_CAMERA_ONLY 1\n":"#define MATERIAL_CAMERA_ONLY 0\n")+
             (motion?"#define MOTION_TEST 1\n":"#define MOTION_TEST 0\n")+
             (billboard?"#define BILLBOARD_TEST 1\n":"#define BILLBOARD_TEST 0\n")+
@@ -480,7 +486,9 @@ int main(int argc,char** argv) {
                         return numerator/denominator;
                     };
                     const float value=billboard?component(billboard_value,axis)*.2f+.5f:
-                        motion?.5f:camera_only?component(origin,axis)*.0025f+.5f:material?(axis==0?nx*.2f+.5f:
+                        motion?.5f:camera_only?component(origin,axis)*.0025f+.5f:
+                        material_world?(axis==0?nx*.2f+.5f:axis==1?world.z*.005f+.5f:
+                            (world.x+frame.pretranslation.x)*.005f+.5f):material?(axis==0?nx*.2f+.5f:
                         axis==1?ny*.2f+.5f:world.z*.005f+.5f):shadow?
                         .5f+.0025f*(project(shadow_space,axis)+project(light_space,axis)):
                         component(world,axis)*.005f+.5f+component(rotation,axis)*.02f;

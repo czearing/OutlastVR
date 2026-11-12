@@ -200,19 +200,30 @@ int main(int argc,char** argv) {
                         "Live display extends beyond the actual LCD bounds");
                 }
         Graph graph(argv[1]);
+        NativeControllerFingers controller_fingers(graph.body.skeleton,body_roles[9],body_roles[13]);
         for (unsigned side=0;side<2;++side) {
             const auto wrist=body_roles[side?13:9];
             const auto anchor=outlast_grip_anchor(graph.body.skeleton,wrist);
             const auto rotation=outlast_grip_wrist_rotation(graph.body.skeleton,tracking,{0,0,0,1},anchor);
+            auto curled=graph.body.skeleton;
+            curled.atoms[std::size_t(wrist)].rotation=rotation;
+            controller_fingers.apply(curled,graph.body.skeleton.atoms,side,0,0,false);
+            const auto open=curled;
+            controller_fingers.apply(curled,graph.body.skeleton.atoms,side,.1f,.1f,false);
             for (unsigned finger=1;finger<5;++finger) {
-                const auto reference=bone_normalize(skeleton_field<Quaternion>(
-                    graph.body.reference.data(),(std::size_t(wrist)+finger*3+1)*0x50+0x10));
-                const auto curl=skeleton_vector(graph.body.skeleton.world,
-                    rotate(rotation,rotate(reference,{1,0,0})));
-                // OpenXR grip +X points away from the left palm and into the right.
-                require(dot(curl,tracking.right)*(side?1.f:-1.f)>.03f,
-                    "Native finger curl faces the wrong side of the OpenXR grip palm");
+                const auto tip=std::size_t(wrist)+finger*3+3;
+                const auto bend=skeleton_vector(curled.world,
+                    add(curled.atoms[tip].position,scale(open.atoms[tip].position,-1)));
+                require(dot(bend,tracking.right)*(side?-1.f:1.f)>.03f,
+                    "Native fingers start curling away from the palm side of the OpenXR grip");
             }
+            Vec3 knuckles{};
+            for (unsigned finger=1;finger<5;++finger)
+                knuckles=add(knuckles,scale(skeleton_field<Vec3>(graph.body.reference.data(),
+                    (std::size_t(wrist)+finger*3+1)*0x50+0x20),.25f));
+            const auto forward=bone_unit(skeleton_vector(graph.body.skeleton.world,rotate(rotation,knuckles)));
+            require(dot(forward,tracking.up)<-.98f,
+                "Native metacarpals face wristward instead of outward from the controller grip");
         }
         {
             const auto source=graph.body.skeleton.atoms;

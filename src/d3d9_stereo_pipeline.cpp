@@ -496,10 +496,8 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
         const auto& uniform=shaders_.tracked_uniforms[index];
         if (!reconstruction_ || !uniform.rows || uniform.rows>4 ||
             uniform.texture_row<8 || uniform.texture_row+uniform.rows>shaders_.view_texture_width ||
-            (uniform.camera_delta_row &&
-             (uniform.vertex || uniform.kind!=sm3::TrackedUniformKind::material_camera ||
-              uniform.camera_delta_row!=uniform.texture_row+uniform.rows ||
-              uniform.camera_delta_row>=shaders_.view_texture_width)))
+            (uniform.material_world_position &&
+             (uniform.vertex || uniform.kind!=sm3::TrackedUniformKind::material_camera)))
             throw std::invalid_argument("Tracked shader requires bounded native reconstruction records");
         auto& original=original_uniforms_[index];
         original.fill(0);
@@ -526,18 +524,9 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
                 float original[16]{};
                 std::copy_n(original_uniforms_[uniform_index].begin(),uniform.rows*4,original);
                 if (uniform.kind==sm3::TrackedUniformKind::material_camera) {
-                    if (uniform.camera_delta_row) {
-                        auto* delta=output+uniform.camera_delta_row*4;
-                        for (unsigned axis=0;axis<3;++axis) {
-                            // Keep small translated positions out of absolute-world float cancellation.
-                            const double value=double(original[axis])+double(views[eye][20+axis])-
-                                double(views[eye][16+axis]);
-                            if (!std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max())
-                                throw std::overflow_error("Material camera delta is nonfinite");
-                            delta[axis]=static_cast<float>(value);
-                        }
-                    }
-                    for (unsigned axis=0;axis<3;++axis) original[axis]=views[eye][16+axis]-views[eye][20+axis];
+                    if (!uniform.material_world_position)
+                        for (unsigned axis=0;axis<3;++axis)
+                            original[axis]=views[eye][16+axis]-views[eye][20+axis];
                     std::copy_n(original,4,output+uniform.texture_row*4);
                 } else if (uniform.kind==sm3::TrackedUniformKind::camera_direction) {
                     const auto& rotation=reconstruction_cache_->transform(*reconstruction_,eye,2);
@@ -581,9 +570,26 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
                     if (uniform.kind==sm3::TrackedUniformKind::material_projection ||
                         uniform.kind==sm3::TrackedUniformKind::translated_projection) {
                         std::copy_n(views[eye].begin(),16,value.begin());
-                        if (uniform.kind==sm3::TrackedUniformKind::material_projection)
-                            value=matrix_product(value,translation_matrix(
-                                {views[eye][16],views[eye][17],views[eye][18]}));
+                        if (uniform.kind==sm3::TrackedUniformKind::material_projection) {
+                            const auto camera=std::find_if(shaders_.tracked_uniforms.begin(),
+                                shaders_.tracked_uniforms.end(),[&](const sm3::TrackedUniform& binding) {
+                                    return binding.vertex==uniform.vertex && binding.material_world_position;
+                                });
+                            if (camera==shaders_.tracked_uniforms.end())
+                                throw std::invalid_argument("Material projection lacks its native world offset");
+                            const auto& offset=original_uniforms_[std::size_t(camera-shaders_.tracked_uniforms.begin())];
+                            for (unsigned row=0;row<4;++row) {
+                                // Fold the camera rebase into projection, not unrelated material reads.
+                                double translated=value[row*4+3];
+                                for (unsigned axis=0;axis<3;++axis)
+                                    translated+=double(value[row*4+axis])*
+                                        (double(offset[axis])+double(views[eye][20+axis]));
+                                if (!std::isfinite(translated) ||
+                                    std::abs(translated)>std::numeric_limits<float>::max())
+                                    throw std::overflow_error("Material projection translation is nonfinite");
+                                value[row*4+3]=static_cast<float>(translated);
+                            }
+                        }
                     } else if (uniform.kind==sm3::TrackedUniformKind::screen_to_light)
                         value=matrix_product(matrix,reconstruction_cache_->transform(*reconstruction_,eye,4));
                     else if (uniform.kind==sm3::TrackedUniformKind::view_to_world)

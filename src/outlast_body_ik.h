@@ -306,7 +306,7 @@ inline NativeGripAnchor outlast_grip_anchor(const NativeSkeleton& skeleton,INT h
     // OpenXR grip -Z runs from little finger toward thumb, not toward
     // the fingertips. These immutable metacarpals also locate the palm.
     result.z=bone_unit(add(knuckles.back(),scale(knuckles.front(),-1)));
-    result.x=bone_unit(cross(result.z,distal));
+    result.x=bone_unit(cross(distal,result.z));
     result.z=bone_unit(add(result.z,scale(result.x,-dot(result.z,result.x))));
     return result;
 }
