@@ -112,6 +112,34 @@ int main(int argc,char** argv) {
             require(std::memcmp(first.atoms.data(),second.atoms.data(),count*sizeof(BoneAtom))==0,
                 "Cached subtree transforms changed native pose bytes");
         }
+        {
+            auto requested=targets;
+            requested.controller_fingers=true;
+            for (unsigned side=0;side<2;++side)
+                requested.hands[side]={{side?.25f:-.25f,-.35f,-.4f},{0,0,0,1}};
+            requested.finger_trigger={.4f,.7f};requested.finger_squeeze={.6f,.8f};
+            for (unsigned side=0;side<2;++side) {
+                const auto wrist=bones[side?13:9];
+                for (const INT root:{bones[side?11:7],wrist,wrist+4,wrist+5})
+                    for (const float visible_scale:{0.f,.25f,1.f}) {
+                        auto pose=rig;
+                        for (INT bone=0;bone<INT(count);++bone)
+                            if (hierarchy.descendant(bone,root)) pose.atoms[std::size_t(bone)].scale=visible_scale;
+                        const auto native=pose.atoms;
+                        ik.apply(pose,requested);
+                        for (INT bone=0;bone<INT(count);++bone) {
+                            require(pose.atoms[std::size_t(bone)].scale==native[std::size_t(bone)].scale,
+                                "Actual-rig pickup changed a native visibility scale");
+                            for (const float value:skeleton_bone_matrix(pose,bone))
+                                require(std::isfinite(value),"Actual-rig pickup produced a nonfinite skin matrix");
+                        }
+                        std::memcpy(atoms.data(),pose.atoms.data(),count*sizeof(BoneAtom));
+                        require(ik.restore(component.data()) &&
+                            std::memcmp(atoms.data(),native.data(),count*sizeof(BoneAtom))==0,
+                            "Pickup restoration overwrote native hiding or retained a collapsed tracked pose");
+                    }
+            }
+        }
         auto changed=rig;changed.parents[12]=0;
         require(!ik.owns(changed),"Changed native topology retained stale cached rig ownership");
         rejects([&]{ik.apply(changed,targets);});

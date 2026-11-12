@@ -81,7 +81,7 @@ struct Fixture {
         return rig;
     }
 };
-void hand_orientation() {
+void hand_orientation(bool visibility=false) {
     std::array<unsigned char,0x400> component{},asset{};
     std::array<unsigned char,33*0x50> reference{};
     std::vector<BoneAtom> atoms(33,BoneAtom{{0,0,0,1},{0,0,0},1});
@@ -96,6 +96,7 @@ void hand_orientation() {
             write(reference.data(),std::size_t(index)*0x50+0x40,joint?index-1:wrist);
             write(reference.data(),std::size_t(index)*0x50+0x20,position);
             write(reference.data(),std::size_t(index)*0x50+0x10,Quaternion{0,0,0,1});
+            atoms[std::size_t(index)].position=add(atoms[std::size_t(joint?index-1:wrist)].position,position);
         }
     }
     write(asset.data(),0xc4,reference.data());write(asset.data(),0xcc,INT(atoms.size()));
@@ -105,6 +106,63 @@ void hand_orientation() {
     write(component.data(),0xc0,world);
     const auto source=outlast_skeleton(component.data());
     NativeControllerFingers fingers(source,1,17);
+    if (visibility) {
+        NativeCameraFingerGrip camera(source,1,17);
+        for (unsigned side=0;side<2;++side) for (unsigned joint:{0u,1u,2u,4u,5u,6u}) {
+            const INT wrist=side?17:1,root=wrist+INT(joint);
+            for (float native_scale:{0.f,-1.f,.25f,1.e-30f,std::numeric_limits<float>::denorm_min()}) {
+                auto native=source;
+                for (std::size_t bone=0;bone<native.atoms.size();++bone)
+                    if (bone_descendant(native,INT(bone),root)) native.atoms[bone].scale=native_scale;
+                for (bool mirror:{false,true}) {
+                    auto rig=native;
+                    if (mirror) camera.apply(rig,native.atoms);
+                    else fingers.apply(rig,native.atoms,side,.4f,.7f,false);
+                    for (std::size_t bone=0;bone<rig.atoms.size();++bone) {
+                        require(rig.atoms[bone].scale==native.atoms[bone].scale,
+                            "Finger articulation changed native hidden/mirrored bone visibility");
+                        require(finite(rig.atoms[bone].position),
+                            "Hidden native finger produced a nonfinite position");
+                        const auto matrix=skeleton_bone_matrix(rig,INT(bone));
+                        for (const auto value:matrix)
+                            require(std::isfinite(value),"Hidden native finger produced a nonfinite skin matrix");
+                        if (rig.atoms[bone].scale==0)
+                            for (unsigned axis=0;axis<3;++axis) for (unsigned row=0;row<3;++row)
+                                require(matrix[axis*4+row]==0,"Articulation made a hidden native bone visible");
+                    }
+                }
+            }
+        }
+        auto expected=source;
+        fingers.apply(expected,source.atoms,0,.4f,.7f,false);
+        for (unsigned frame=0;frame<24;++frame) {
+            auto rig=source;
+            if (frame%2)
+                for (std::size_t bone=1;bone<17;++bone) rig.atoms[bone].scale=0;
+            const auto native=rig.atoms;
+            fingers.apply(rig,native,0,.4f,.7f,false);
+            if (!(frame%2))
+                require(std::memcmp(rig.atoms.data(),expected.atoms.data(),rig.atoms.size()*sizeof(BoneAtom))==0,
+                    "Pickup visibility recovery retained a collapsed or altered hand");
+        }
+        for (bool mirror:{false,true}) {
+            auto rig=source;
+            rig.atoms[1].scale=.5f;
+            if (mirror) camera.apply(rig,source.atoms);
+            else fingers.apply(rig,source.atoms,0,0,0,false);
+            for (std::size_t bone=1;bone<17;++bone)
+                require(rig.atoms[bone].scale==.5f &&
+                    distance(rig.atoms[bone].position,scale(source.atoms[bone].position,.5f))<.0001f,
+                    "Finger visibility fix changed inherited positive-scale transforms");
+        }
+        auto invalid=source;
+        invalid.atoms[1].scale=std::numeric_limits<float>::quiet_NaN();
+        bool rejected=false;
+        try {fingers.apply(invalid,invalid.atoms,0,0,0,false);}
+        catch (const std::runtime_error&) {rejected=true;}
+        require(rejected,"Nonfinite native finger scale was silently accepted");
+        return;
+    }
     const TrackingFrame tracking{{0,0,0},{0,1,0},{0,0,1},{-1,0,0},100,{}};
     for (unsigned frame=0;frame<48;++frame) {
         const float angle=float(frame)*.130899694f;
@@ -141,9 +199,14 @@ int main(int argc,char** argv) {
     try {
         const std::string mode=argc==2?argv[1]:"";
         require(argc<=2 && (mode.empty() || mode=="--partial-animation" || mode=="--crouch-cycles" ||
-            mode=="--hand-orientation"),
+            mode=="--hand-orientation" || mode=="--hidden-bones"),
             "Unknown lifecycle test mode");
         if (mode.empty() || mode=="--hand-orientation") hand_orientation();
+        if (mode.empty() || mode=="--hidden-bones") {
+            hand_orientation(true);
+            std::cout<<"PASS: native_hidden_bone_visibility; both_hands; partial_finger_hiding; "
+                <<"signed_scales; finite_skinning; repeated_recovery; nonfinite_rejected\n";
+        }
         if (mode.empty() || mode=="--partial-animation") {
             Fixture f;
             f.targets.head.position={.03f,-.2f,.02f};

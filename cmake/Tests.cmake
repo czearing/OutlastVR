@@ -20,6 +20,8 @@ foreach(name IN ITEMS
     test_headlocked_ui test_world_scissor test_outlast_native_view)
     olvr_test(${name})
 endforeach()
+add_test(NAME test_native_hidden_bones COMMAND test_outlast_body_lifecycle --hidden-bones)
+set_tests_properties(test_native_hidden_bones PROPERTIES LABELS "cpu" TIMEOUT 120)
 foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery snap-recovery)
     string(REPLACE "-" "_" test_mode "${mode}")
     add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})

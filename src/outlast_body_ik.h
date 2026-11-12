@@ -19,6 +19,18 @@ inline Quaternion bone_normalize(Quaternion q) {
     if (!std::isfinite(length) || length<1e-6f) throw std::runtime_error("Degenerate IK rotation");
     return {q.x/length,q.y/length,q.z/length,q.w/length};
 }
+inline float bone_retarget_value(float original_parent,float parent,float value) {
+    if (!std::isfinite(original_parent) || !std::isfinite(parent) || !std::isfinite(value))
+        throw std::runtime_error("Nonfinite native finger transform");
+    // Native visibility can collapse a bone to zero; its component scale still belongs to the game.
+    if (original_parent==parent) return value;
+    if (original_parent==0)
+        throw std::runtime_error("Cannot recover local finger scale from a changed collapsed parent");
+    const double result=double(parent)*double(value)/double(original_parent);
+    if (!std::isfinite(result) || std::abs(result)>std::numeric_limits<float>::max())
+        throw std::runtime_error("Native finger scale overflowed");
+    return static_cast<float>(result);
+}
 inline Quaternion bone_between(Vec3 from,Vec3 to) {
     from=bone_unit(from);to=bone_unit(to);
     const auto value=std::clamp(dot(from,to),-1.f,1.f);
@@ -182,19 +194,22 @@ public:
             const auto& original=source.at(l);
             const auto& original_parent=source.at(lp);
             const auto& parent=skeleton.atoms.at(lp);
-            if (original_parent.scale<=0 || parent.scale<=0)
-                throw std::runtime_error("Mirrored native camera grip has invalid parent scale");
+            const auto target_scale=bone_retarget_value(original_parent.scale,parent.scale,original.scale);
             const auto right_local=bone_normalize(bone_multiply(
                 bone_inverse(source.at(rp).rotation),source.at(r).rotation));
             // Conjugating by a reflection reverses quaternion X/Y, not just positions.
             const auto delta=reflected(bone_multiply(right_local,bone_inverse(right_reference_[i])));
             const auto left_local=bone_multiply(delta,left_reference_[i]);
-            const auto position=scale(rotate(bone_inverse(original_parent.rotation),
-                add(original.position,scale(original_parent.position,-1))),1/original_parent.scale);
+            const auto offset=rotate(bone_inverse(original_parent.rotation),
+                add(original.position,scale(original_parent.position,-1)));
+            const Vec3 position{
+                bone_retarget_value(original_parent.scale,parent.scale,offset.x),
+                bone_retarget_value(original_parent.scale,parent.scale,offset.y),
+                bone_retarget_value(original_parent.scale,parent.scale,offset.z)};
             auto& target=skeleton.atoms.at(l);
             target.rotation=bone_normalize(bone_multiply(parent.rotation,left_local));
-            target.position=add(parent.position,rotate(parent.rotation,scale(position,parent.scale)));
-            target.scale=parent.scale*original.scale/original_parent.scale;
+            target.position=add(parent.position,rotate(parent.rotation,position));
+            target.scale=target_scale;
         }
     }
 };
@@ -264,11 +279,10 @@ public:
             const auto local=blend(reference,closed,amount);
             const auto& p=skeleton.atoms[parent];
             auto& target=skeleton.atoms[index];
-            if (original[parent].scale<=0 || p.scale<=0)
-                throw std::runtime_error("Controller finger parent has invalid scale");
+            const auto target_scale=bone_retarget_value(original[parent].scale,p.scale,original[index].scale);
             target.position=add(p.position,rotate(p.rotation,scale(positions_[side][i],p.scale)));
             target.rotation=bone_normalize(bone_multiply(p.rotation,local));
-            target.scale=p.scale*original[index].scale/original[parent].scale;
+            target.scale=target_scale;
         }
     }
 };
