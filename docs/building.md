@@ -1,11 +1,13 @@
-# Building and testing
+# Building
 
-## Toolchain
+## Requirements
 
 - Windows x64, CMake 3.24+, Ninja and Git.
-- MinGW-w64 GCC (the CI uses MSYS2 UCRT64).
-- Windows 10/11 SDK, including `d3d9on12.h`.
-- Python 3.10+ and the diagnostic test dependencies.
+- MinGW-w64 GCC. CI uses MSYS2 UCRT64.
+- Windows 10/11 SDK with `d3d9on12.h`.
+- Python 3.10+.
+
+## Build and test
 
 Run in a shell with `gcc`, `g++`, `cmake`, `ninja` and `python` on PATH:
 
@@ -14,45 +16,53 @@ python -m pip install -r tools\diagnostics\requirements.txt
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
-cmake --install build --prefix dist\OutlastVR --component Runtime
 ```
 
-MinHook and the OpenXR loader are fetched at pinned commits during configuration.
-If SDK discovery fails, set `-DOLVR_WINDOWS_SDK_UM=<SDK Include\version\um>`.
+CMake fetches MinHook and the OpenXR loader at pinned revisions. If SDK discovery
+fails, set `-DOLVR_WINDOWS_SDK_UM=<SDK Include\version\um>`.
 
-## Optional hardware and retail tests
+## Optional test inputs
 
-Add `-DOLVR_GPU_TESTS=ON` for D3D12 GPU tests. These require a hardware GPU
-and do not run on GitHub's hosted runners. They do not launch the game.
-`-DOLVR_RETAIL_EXECUTABLE=<absolute OLGame.exe>` enables additional local offline
-tests against the supported executable. `-DOLVR_HERO_FIXTURE=<rig file>`
-enables rig-dependent tests. Neither input is redistributable or included in CI.
+| CMake option | Purpose |
+| --- | --- |
+| `OLVR_GPU_TESTS=ON` | Enable real D3D12 hardware tests. |
+| `OLVR_RETAIL_EXECUTABLE=<absolute OLGame.exe>` | Enable offline tests against the supported executable. |
+| `OLVR_HERO_FIXTURE=<rig file>` | Enable tests using a locally retained native rig. |
+| `OLVR_BUILD_DIAGNOSTICS=ON` | Build developer-only probe and rendering diagnostics. |
 
-`-DOLVR_BUILD_DIAGNOSTICS=ON` builds the developer-only headset-free probe and
-the native draw, shader-rejection, replay and soft-particle diagnostic tools.
-They are not run by the default test suite or included in release packages.
-See the [playtest checklist](testing.md) for hardware testing.
+Pass these with `-D` when configuring. GPU tests are not run on GitHub's hosted
+runners. Retail inputs and rig captures are private and must not be distributed.
+Diagnostic tools are not included in release packages. See [testing](testing.md)
+for unattended and headset checks.
 
-## Layout
+## Package a release
 
-- `src/`: runtime, launcher, stereo renderer, input and experimental camera.
-- `tests/native/`: C++ regression and optional hardware/retail tests.
-- `tests/python/`: diagnostic and package tests.
-- `tools/diagnostics/`: offline shader/evidence analysis, not release binaries.
-- `config/`: shipped default settings.
-- `cmake/`: shared test definitions.
-- `.github/workflows/`: build/test/package and tag-triggered release automation.
+Commit the source changes first. Set `$version` to the intended release version,
+without a leading `v`. Its numeric part must match the CMake project version.
 
-## Releases
+```powershell
+.\tools\package.ps1 -Version $version
+python tools\verify_package.py "dist\OutlastVR-$version-win64"
+```
 
-Every pull request and push builds the production binaries, runs CPU/Python
-tests, checks a clean package, and uploads a checksummed ZIP. Version tags
-`vX.Y.Z` publish a release only after those checks pass. Tags containing a suffix
-(for example `v0.1.0-rc.1`) are marked prerelease. The numeric part must match
-the CMake project version. Do not tag a stable release until headset acceptance
-and known regressions have been reviewed.
-
-For a committed local build, run `.\tools\package.ps1` and then
-`python tools\verify_package.py dist\OutlastVR-0.1.0-win64`.
-The verifier checks package contents, hashes and DLL loading without launching
+Packaging records the source commit, pins bundled documentation links to that
+revision, and writes a ZIP with a checksum. The verifier checks the inventory,
+file hashes, documentation revision and standalone DLL loading without starting
 the game.
+
+For a release, add `releases\<version>.json` and use the required
+[release-note template](../releases/template.md). The tag `v<version>` publishes
+only after CI passes; a version suffix marks the release as a prerelease.
+Complete the [headset checklist](testing.md#headset-playtest) before promoting
+a stable release.
+
+## Repository layout
+
+| Directory | Contents |
+| --- | --- |
+| `src` | Runtime, launcher, stereo rendering and input |
+| `config` | Shipped INI defaults |
+| `tests` | Native and Python regressions |
+| `tools` | Packaging, release notes and diagnostics |
+| `cmake` | Test registration |
+| `.github` | CI, release automation and issue forms |

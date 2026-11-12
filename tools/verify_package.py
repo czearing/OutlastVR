@@ -5,7 +5,17 @@ from ctypes import wintypes
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
+
+
+def verify_documentation(readme, source_commit):
+    if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise ValueError("Package documentation requires a full source commit")
+    revisions = re.findall(
+        r"https://github\.com/czearing/OutlastVR/(?:blob|tree)/([^/\s)]+)/", readme)
+    if not revisions or any(revision != source_commit for revision in revisions):
+        raise ValueError("Packaged documentation links must use the package source commit")
 
 
 def verify(folder):
@@ -27,6 +37,8 @@ def verify(folder):
         data = (folder / entry["path"]).read_bytes()
         if hashlib.sha256(data).hexdigest() != entry["sha256"]:
             raise ValueError("Release content differs from its manifest: " + entry["path"])
+    verify_documentation((folder / "README.md").read_text(encoding="utf-8-sig"),
+                         manifest["source_commit"])
     config = (folder / "OutlastVR.ini").read_text(encoding="utf-8-sig")
     if "\nphysical_camcorder=false\n" not in "\n" + config.replace("\r\n", "\n"):
         raise ValueError("Release config does not disable the experimental camcorder")

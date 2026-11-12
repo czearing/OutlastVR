@@ -21,6 +21,11 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $zip)) {throw 'R
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 & cmake --install $build --prefix $stage --component Runtime
 if ($LASTEXITCODE -ne 0) {throw 'Runtime installation failed'}
+$readme = Join-Path $stage 'README.md'
+$readmeText = [IO.File]::ReadAllText($readme).Replace(
+    'https://github.com/czearing/OutlastVR/blob/master/',
+    "https://github.com/czearing/OutlastVR/blob/$($commit.Trim())/")
+[IO.File]::WriteAllText($readme, $readmeText, [Text.UTF8Encoding]::new($false))
 $expected = @('OutlastVRLauncher.exe','OutlastVRSinglePass.dll','openxr_loader.dll',
     'OutlastVR.ini','README.md','LICENSE','THIRD_PARTY_NOTICES.md',
     'licenses\MinHook.txt','licenses\OpenXR.txt','licenses\OpenXR-MIT.txt','licenses\JsonCpp.txt',

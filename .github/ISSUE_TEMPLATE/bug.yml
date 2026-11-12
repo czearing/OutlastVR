@@ -10,14 +10,14 @@ body:
   - type: input
     id: runtime
     attributes:
-      label: Headset, OpenXR runtime and GPU
+      label: Headset, controllers, OpenXR runtime and GPU/driver
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Steps to reproduce
-      description: Include expected/actual behavior and whether the physical camcorder is enabled.
+      description: Include the scene/checkpoint, expected/actual behavior, changed settings and whether the physical camcorder is enabled.
     validations:
       required: true
   - type: textarea
