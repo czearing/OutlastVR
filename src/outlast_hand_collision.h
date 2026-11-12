@@ -24,12 +24,20 @@ struct HandContact {
     float controller_distance=0;
     bool blocked=false;
 };
-enum class HandContactReset { None,Distant,Occluded };
+enum class HandContactReset { None,Distant,Occluded,Overlap };
 struct HandContactDiagnostic {
     Vec3 previous_position{},previous_anchor{};
     bool valid=false,blocked=false,revalidated=false;
     HandContactReset reset=HandContactReset::None;
 };
+inline Vec3 outlast_hand_collision_anchor(Vec3 root,float eye_height,const TrackingFrame& tracking,
+                                         Vec3 head_offset,float standing_delta) {
+    if (!finite(root) || !finite(head_offset) || !std::isfinite(eye_height) ||
+        !std::isfinite(standing_delta))
+        throw std::invalid_argument("Invalid tracked upper-body collision anchor");
+    const auto offset=add(map_tracking(tracking,head_offset),scale(tracking.up,standing_delta));
+    return add({root.x,root.y,root.z+eye_height*.75f},scale(offset,tracking.units_per_meter));
+}
 
 class OutlastHandCollision {
     std::array<Vec3,2> previous_{};
@@ -74,8 +82,34 @@ public:
             NativeHandHit hit{};
             const bool clear=trace(hit,desired,start,extent);
             if (clear) {start=desired;break;}
-            if (!std::isfinite(hit.time) || hit.time<0 || hit.time>1 || !finite(hit.normal) ||
-                std::abs(dot(hit.normal,hit.normal)-1)>.01f)
+            if (!std::isfinite(hit.time) || hit.time<0 || hit.time>1 || !finite(hit.normal))
+                throw std::runtime_error("Native hand sweep returned an invalid contact");
+            if (iteration==0 && hit.time==0) {
+                const std::array<Vec3,6> probes{{{skin,0,0},{-skin,0,0},
+                    {0,skin,0},{0,-skin,0},{0,0,skin},{0,0,-skin}}};
+                auto volume=[&](Vec3 center,bool overlapping) {
+                    for (const auto probe:probes) {
+                        NativeHandHit sample{};
+                        const auto origin=add(center,probe);
+                        const auto step=add(origin,scale(center,-1));
+                        if (dot(step,step)==0) return false;
+                        const bool free=trace(sample,center,origin,extent);
+                        if (!free && (!std::isfinite(sample.time) || sample.time<0 || sample.time>1))
+                            throw std::runtime_error("Native hand volume probe returned an invalid contact");
+                        if (overlapping ? free || sample.time!=0 : !free) return false;
+                    }
+                    return true;
+                };
+                // Use finite sweeps in both directions, not an engine-specific stationary query.
+                if (volume(start,true)) {
+                    if (volume(controller,false)) {
+                        start=controller;blocked=false;
+                        if (diagnostic) diagnostic->reset=HandContactReset::Overlap;
+                    } else blocked=true;
+                    break;
+                }
+            }
+            if (std::abs(dot(hit.normal,hit.normal)-1)>.01f)
                 throw std::runtime_error("Native hand sweep returned an invalid contact");
             blocked=true;
             start=add(start,scale(delta,std::max(0.f,hit.time-skin/length)));

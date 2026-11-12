@@ -109,4 +109,51 @@ public:
         return original(x,y);
     }
 };
+
+class OutlastWindowCursor {
+    inline static std::mutex instance_mutex_;
+    inline static OutlastWindowCursor* instance_=nullptr;
+    HWND window_;
+    const OutlastDesktopCursor& policy_;
+    bool(WINAPI* focused_client_)(HWND);
+    HHOOK hook_=nullptr;
+    static LRESULT CALLBACK returned(int code,WPARAM message,LPARAM data) {
+        const auto result=CallNextHookEx(nullptr,code,message,data);
+        if (code<0) return result;
+        const auto& event=*reinterpret_cast<const CWPRETSTRUCT*>(data);
+        if (event.message!=WM_SETCURSOR || LOWORD(event.lParam)!=HTCLIENT) return result;
+        std::lock_guard<std::mutex> lock(instance_mutex_);
+        const auto* self=instance_;
+        if (self) {
+            if (event.hwnd==self->window_ && self->focused_client_(self->window_) &&
+                self->policy_.menu_position())
+                SetCursor(nullptr);
+        }
+        return result;
+    }
+public:
+    OutlastWindowCursor(HWND window,const OutlastDesktopCursor& policy,
+        bool(WINAPI* focused_client)(HWND)):window_(window),policy_(policy),focused_client_(focused_client) {
+        DWORD process=0;
+        const auto thread=GetWindowThreadProcessId(window,&process);
+        if (!window || !focused_client || !thread || process!=GetCurrentProcessId())
+            throw std::invalid_argument("Menu cursor hook requires an owned native window");
+        std::lock_guard<std::mutex> lock(instance_mutex_);
+        if (instance_)
+            throw std::logic_error("Native menu cursor window hook is already active");
+        instance_=this;
+        hook_=SetWindowsHookExW(WH_CALLWNDPROCRET,&returned,nullptr,thread);
+        if (!hook_) {
+            instance_=nullptr;
+            throw std::runtime_error("Cannot observe owned native cursor messages");
+        }
+    }
+    OutlastWindowCursor(const OutlastWindowCursor&)=delete;
+    OutlastWindowCursor& operator=(const OutlastWindowCursor&)=delete;
+    ~OutlastWindowCursor() {
+        if (!UnhookWindowsHookEx(hook_)) std::terminate();
+        std::lock_guard<std::mutex> lock(instance_mutex_);
+        instance_=nullptr;
+    }
+};
 }

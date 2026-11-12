@@ -12,6 +12,8 @@
 #include "outlast_body_ik.h"
 #include "outlast_hand_alignment.h"
 #include "outlast_hand_collision.h"
+#include "outlast_vr_hints.h"
+#include "outlast_menu_cursor.h"
 #include "outlast_desktop_cursor.h"
 #include "outlast_focus_pause.h"
 #include "outlast_menu_state.h"
@@ -198,6 +200,8 @@ class Runtime {
     bool ui_draw_=false;
     using MenuStateEntry=std::uint64_t(WINAPI*)();
     MenuStateEntry menu_state_=nullptr;
+    NativeHintFormat original_hint_format_=nullptr,native_string_copy_=nullptr;
+    NativeLocalize original_localize_=nullptr;
     using MenuMovieEntry=const void*(WINAPI*)(const void*,UINT);
     MenuMovieEntry menu_movie_=nullptr;
     bool menu_seen_=false;
@@ -294,6 +298,9 @@ class Runtime {
     std::ofstream camcorder_gpu_events_;
     static inline thread_local Com<IDirect3DTexture9>* probe_created_texture_=nullptr;
     std::optional<OutlastDesktopCursor> desktop_cursor_;
+    std::unique_ptr<OutlastWindowCursor> window_cursor_;
+    OutlastMenuCursor software_cursor_;
+    std::vector<OutlastCursorMovie> cursor_movies_;
     std::ofstream probe_menu_pointer_;
     bool probe_menu_fixture_=false;
     std::atomic<UINT64> native_menu_cursor_queries_{0};
@@ -604,6 +611,8 @@ class Runtime {
         D3DDEVICE_CREATION_PARAMETERS creation{};
         gpu_check(device.GetCreationParameters(&creation),"Locate owned menu input window");
         menu_window_=creation.hFocusWindow;
+        if (!test_ && desktop_cursor_)
+            window_cursor_=std::make_unique<OutlastWindowCursor>(menu_window_,*desktop_cursor_,&focused_cursor_client);
         variants_=std::make_unique<D3D9ShaderVariants>(device);
         gpu_profile_=std::make_unique<D3D9FrameProfile>(device);
         com_hook(&device,18,&backbuffer);com_hook(&device,37,&set_target);
@@ -1599,7 +1608,8 @@ class Runtime {
         tracking.right=turn(tracking.right);tracking.up=turn(tracking.up);tracking.backward=turn(tracking.backward);
         auto* world=*native_world_;
         if (!world) throw std::runtime_error("Eligible native hand collision has no current world");
-        const Vec3 anchor{root.x,root.y,root.z+field<float>(hero,0x360)*.75f};
+        const auto anchor=outlast_hand_collision_anchor(root,field<float>(hero,0x360),tracking,
+            request->targets.head.position,request->targets.standing_height_delta);
         CollisionFrame result{};
         result.tracked=request->targets.tracked;result.root=root;result.hero=request->native.hero;
         result.world=world;result.generation=generation;result.clock=now;
@@ -1951,23 +1961,50 @@ class Runtime {
             return result;
         });
     }
+    static bool WINAPI focused_cursor_client(HWND window) {
+        return guarded([&] {
+            auto& r=self();
+            bool client=false;
+            if (window && GetForegroundWindow()==window) {
+                POINT desktop{};
+                RECT rectangle{};
+                if (!r.original_get_cursor_pos_(&desktop) || !GetClientRect(window,&rectangle))
+                    throw std::runtime_error("Cannot determine owned menu cursor visibility");
+                const auto under=WindowFromPoint(desktop);
+                if (!ScreenToClient(window,&desktop))
+                    throw std::runtime_error("Cannot map owned menu cursor visibility");
+                client=PtInRect(&rectangle,desktop) &&
+                    (under==window || IsChild(window,under));
+            }
+            return client;
+        });
+    }
     static HCURSOR WINAPI desktop_set_cursor(HCURSOR cursor) {
         const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
         return guarded([&] {
             auto& r=self();
-            bool client=false;
-            if (r.menu_window_ && GetForegroundWindow()==r.menu_window_) {
-                POINT desktop{};
-                RECT rectangle{};
-                if (!r.original_get_cursor_pos_(&desktop) || !GetClientRect(r.menu_window_,&rectangle))
-                    throw std::runtime_error("Cannot determine owned menu cursor visibility");
-                const auto under=WindowFromPoint(desktop);
-                if (!ScreenToClient(r.menu_window_,&desktop))
-                    throw std::runtime_error("Cannot map owned menu cursor visibility");
-                client=PtInRect(&rectangle,desktop) &&
-                    (under==r.menu_window_ || IsChild(r.menu_window_,under));
+            return r.desktop_cursor_->cursor(r.original_set_cursor_,caller,cursor,focused_cursor_client(r.menu_window_));
+        });
+    }
+    static NativeUiString* WINAPI format_vr_hint(NativeUiString* output,const NativeUiString* input) {
+        return guarded([&] {
+            auto& r=self();
+            return outlast_format_vr_hint(output,input,r.original_hint_format_,r.native_string_copy_,r.config_);
+        });
+    }
+    static NativeUiString* WINAPI localize_vr_tutorial(NativeUiString* output,const wchar_t* section,
+        const wchar_t* key,const wchar_t* package,const wchar_t* language,INT optional) {
+        return guarded([&] {
+            auto& r=self();
+            if (section && key && package && std::wstring_view(section)==L"Tutorials" &&
+                std::wstring_view(package)==L"OLGame") {
+                if (const auto text=outlast_vr_tutorial(key,r.config_)) {
+                    const INT count=INT(text->size()+1);
+                    const NativeUiString borrowed{const_cast<wchar_t*>(text->c_str()),count,count};
+                    return r.native_string_copy_(output,&borrowed);
+                }
             }
-            return r.desktop_cursor_->cursor(r.original_set_cursor_,caller,cursor,client);
+            return r.original_localize_(output,section,key,package,language,optional);
         });
     }
     void controller_menu_pointer(bool panel,IDirect3DSurface9* output) {
@@ -2005,7 +2042,7 @@ class Runtime {
         } else desktop_cursor_->menu_pointer(false);
         if (menu_window_ && GetForegroundWindow()==menu_window_ &&
             was_active!=desktop_cursor_->menu_position().has_value() &&
-            !PostMessageW(menu_window_,WM_SETCURSOR,reinterpret_cast<WPARAM>(menu_window_),
+            !SendNotifyMessageW(menu_window_,WM_SETCURSOR,reinterpret_cast<WPARAM>(menu_window_),
                 MAKELPARAM(HTCLIENT,WM_MOUSEMOVE)))
             throw std::runtime_error("Cannot refresh the owned native menu cursor");
         if (down!=menu_pointer_down_) {
@@ -2608,9 +2645,29 @@ class Runtime {
                 field<UINT>(owner,0x114));
         native_interactive_menu_.store(interactive,std::memory_order_release);
     }
+    void native_menu_cursor(bool pointer) {
+        if (test_ || (!pointer && !software_cursor_.pending())) return;
+        const auto* engine=field<const void*>(reinterpret_cast<const void*>(base_),0x201b8e0);
+        const auto count=engine?field<INT>(engine,0x24):0;
+        const auto records=engine?field<void**>(engine,0x1c):nullptr;
+        if (count<0 || count>256 || (count && !records))
+            throw std::runtime_error("Invalid native movie inventory for cursor visibility");
+        cursor_movies_.clear();
+        for (INT i=0;i<count;++i) {
+            if (!records[i]) continue;
+            const auto owner=field<std::uintptr_t>(records[i],0x70);
+            const auto view=field<std::uintptr_t>(records[i],0x3c);
+            if (owner && view && !(field<UINT64>(reinterpret_cast<void*>(owner),0x10)&0x2000000200000000ull))
+                cursor_movies_.push_back({owner,view});
+        }
+        software_cursor_.update(pointer,cursor_movies_,
+            [](const auto& movie) {return OutlastNativeCursor(movie.owner).visible();},
+            [](const auto& movie,bool visible) {OutlastNativeCursor(movie.owner).visible(visible);});
+    }
     void native_menu_motion(float elapsed) {
         if (!desktop_cursor_) return;
         const auto point=desktop_cursor_->menu_position();
+        native_menu_cursor(point.has_value());
         std::vector<MenuEdge> edges;
         {
             std::lock_guard<std::mutex> lock(menu_edge_mutex_);
@@ -2922,7 +2979,8 @@ class Runtime {
     D3D9StereoPipeline& pipeline() {
         Internal internal;
         DWORD scissor=0;gpu_check(device_->GetRenderState(D3DRS_SCISSORTESTENABLE,&scissor),"Read native scissor state");
-        const auto samplers=variants_->bound_atlas_samplers();
+        Com<IDirect3DPixelShader9> selected_pixel;
+        const auto samplers=variants_->bound_atlas_samplers(&selected_pixel);
         Com<IDirect3DSurface9> target;
         gpu_check(device_->GetRenderTarget(0,target.put()),"Identify native final UI target");
         ui_draw_=!present_panel_ && target.get()==final_surface_.get() && !samplers &&
@@ -2947,7 +3005,8 @@ class Runtime {
         const bool eye_view=!ui_draw_ && render_ && render_->current;
         auto& result=[&]() ->D3D9StereoPipeline& {
             try {
-                return variants_->current(samplers,tracked,eye_view,scissor!=0,true,tracked,ui_draw_ && frame_open_);
+                return variants_->current(samplers,tracked,eye_view,scissor!=0,true,tracked,
+                    ui_draw_ && frame_open_,selected_pixel.get());
             } catch (const std::exception& error) {
                 log("Native shader transformation refused: "+std::string(error.what()));
                 if (headless_probe) {
@@ -4314,6 +4373,11 @@ public:
                 if (!physical_camcorder)
                     log("Simple full-view night-vision filter: right thumbstick click; physical camcorder disabled");
                 if (motion_enabled_) {
+                    native_string_copy_=retail_entry<NativeHintFormat>(image,0xf370);
+                    hooks_->add(retail_entry<NativeHintFormat>(image,0xd8bf90),
+                        &format_vr_hint,original_hint_format_);
+                    hooks_->add(retail_entry<NativeLocalize>(image,0xb0340),
+                        &localize_vr_tutorial,original_localize_);
                     world_trace_=retail_entry<NativeWorldTrace>(image,0x506920);
                     complete_pickup_=retail_entry<OutlastPickupComplete>(image,0xd8ce40);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xce8f10),&native_pickup,original_pickup_);
@@ -4406,6 +4470,7 @@ public:
         }
     }
     ~Runtime() {
+        window_cursor_.reset();
         if (watchdog_ && !DeleteTimerQueueTimer(nullptr,watchdog_,INVALID_HANDLE_VALUE))
             std::terminate();
         Internal internal;

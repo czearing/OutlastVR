@@ -139,8 +139,9 @@ public:
         if (!pixel.get()) throw std::runtime_error("Selected atlas draw has no programmable pixel shader");
         return checked_atlas_samplers(mask,sampler_usage(*pixel.get()));
     }
-    unsigned bound_atlas_samplers() {
-        Com<IDirect3DPixelShader9> pixel;
+    unsigned bound_atlas_samplers(Com<IDirect3DPixelShader9>* selected=nullptr) {
+        Com<IDirect3DPixelShader9> local;
+        auto& pixel=selected?*selected:local;
         gpu_check(device_->GetPixelShader(pixel.put()),"Get declared atlas sampler shader");
         if (!pixel.get()) throw std::runtime_error("Selected atlas draw has no programmable pixel shader");
         const auto& usage=sampler_usage(*pixel.get());
@@ -227,11 +228,13 @@ public:
     }
     D3D9StereoPipeline& current(unsigned atlas_samplers=0,bool eye_camera=false,
                                bool eye_view=true,bool scissor=false,bool viewport_transform=false,
-                               bool tracked_uniforms=false,bool ui_plane=false) {
+                               bool tracked_uniforms=false,bool ui_plane=false,
+                               IDirect3DPixelShader9* selected_pixel=nullptr) {
         Com<IDirect3DVertexShader9> vertex;
         Com<IDirect3DPixelShader9> pixel;
         gpu_check(device_->GetVertexShader(vertex.put()),"Get original bound vertex shader");
-        gpu_check(device_->GetPixelShader(pixel.put()),"Get original bound pixel shader");
+        if (selected_pixel) {*pixel.put()=selected_pixel;selected_pixel->AddRef();}
+        else gpu_check(device_->GetPixelShader(pixel.put()),"Get original bound pixel shader");
         if (!vertex.get() || !pixel.get()) throw std::runtime_error("Selected scene draw has no programmable SM3 shader pair");
         atlas_samplers=checked_atlas_samplers(atlas_samplers,sampler_usage(*pixel.get()));
         const auto points=native_point_atlas_samplers(*device_.get(),atlas_samplers);

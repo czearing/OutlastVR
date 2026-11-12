@@ -12,7 +12,7 @@ foreach(name IN ITEMS
     test_outlast_config test_outlast_night_vision test_outlast_camcorder
     test_native_camcorder_lifecycle test_native_camera_resources
     test_outlast_desktop_cursor test_outlast_focus_pause test_outlast_render_size
-    test_outlast_motion_controls test_outlast_native_use test_outlast_hand_collision
+    test_outlast_motion_controls test_outlast_native_use test_outlast_hand_collision test_outlast_vr_hints
     test_outlast_body_lifecycle
     test_outlast_comfort
     test_native_probe_progress test_native_probe_input test_outlast_locomotion_camera

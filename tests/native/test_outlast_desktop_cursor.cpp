@@ -1,4 +1,5 @@
 #include "outlast_desktop_cursor.h"
+#include "outlast_menu_cursor.h"
 #include <iostream>
 
 namespace {
@@ -7,6 +8,29 @@ const RECT* last_rectangle=nullptr;
 int last_x=0,last_y=0;
 BOOL result=TRUE;
 HCURSOR current_cursor=nullptr;
+HWND simulated_foreground=nullptr;
+bool simulated_client=true;
+void require(bool condition,const char* message);
+bool WINAPI focused_client(HWND window) {return simulated_foreground==window && simulated_client;}
+struct CursorMovie {
+    void** table;
+    bool visible=true,reject=false;
+};
+void cursor_path(const olvr::NativeUiString* path) {
+    require(std::wstring(path->data)==L"_root.mouseCursor.my_cursor._visible" &&
+        path->count==INT(std::wcslen(path->data)+1) && path->capacity==path->count,
+        "Native cursor call hid the input parent rather than the shipped cursor image");
+}
+INT WINAPI cursor_get(void* owner,const olvr::NativeUiString* path) {
+    cursor_path(path);
+    return static_cast<CursorMovie*>(owner)->visible?1:0;
+}
+void WINAPI cursor_set(void* owner,const olvr::NativeUiString* path,INT value) {
+    cursor_path(path);
+    require(value==0 || value==1,"Native cursor setter received an invalid boolean");
+    auto& movie=*static_cast<CursorMovie*>(owner);
+    if (!movie.reject) movie.visible=value!=0;
+}
 HCURSOR WINAPI cursor(HCURSOR value) {const auto previous=current_cursor;current_cursor=value;return previous;}
 BOOL WINAPI clip(const RECT* rectangle) {++clips;last_rectangle=rectangle;return result;}
 BOOL WINAPI position(int x,int y) {++positions;last_x=x;last_y=y;return result;}
@@ -39,6 +63,89 @@ int main(int argc,char** argv) {
         try {policy.cursor(nullptr,base,arrow,true);}
         catch (const std::invalid_argument&) {missing_cursor=true;}
         require(missing_cursor,"Missing cursor visibility binding silently succeeded");
+        {
+            std::array<void*,91> table{};
+            table[0x2a0/sizeof(void*)]=reinterpret_cast<void*>(&cursor_get);
+            table[0x2d0/sizeof(void*)]=reinterpret_cast<void*>(&cursor_set);
+            CursorMovie movie{table.data()};
+            olvr::OutlastNativeCursor image(reinterpret_cast<std::uintptr_t>(&movie));
+            require(image.visible(),"Native cursor getter did not use the recovered virtual entry");
+            image.visible(false);
+            require(!movie.visible && !image.visible(),"Native cursor setter did not hide the image");
+            image.visible(true);
+            require(movie.visible,"Native cursor setter did not restore the image");
+            movie.reject=true;
+            bool rejected=false;
+            try {image.visible(false);}
+            catch (const std::runtime_error&) {rejected=true;}
+            require(rejected,"Failed native cursor writes were silently accepted");
+        }
+        {
+            olvr::OutlastMenuCursor software;
+            std::vector<olvr::OutlastCursorMovie> movies{{1,10},{2,20}};
+            bool visible=true;
+            unsigned writes=0;
+            auto read=[&](const auto& movie) {return movie.owner==1 && visible;};
+            auto write=[&](const auto& movie,bool value) {
+                require(movie.owner==1,"Cursor suppression modified a movie without the shipped cursor image");
+                visible=value;++writes;
+            };
+            software.update(true,movies,read,write);
+            require(!visible && writes==1 && software.pending(),"Actual software cursor image was not hidden");
+            software.update(true,movies,read,write);
+            require(writes==1,"Unchanged software cursor visibility caused repeated native writes");
+            visible=true;software.update(true,movies,read,write);
+            require(!visible && writes==2,"A native cursor visibility refresh escaped suppression");
+            software.update(false,movies,read,write);
+            require(visible && writes==3 && !software.pending(),"Closing VR pointer did not restore the software cursor");
+            software.update(true,movies,read,write);
+            movies[0].view=11;
+            visible=false;
+            software.update(false,movies,read,write);
+            require(!visible && writes==4 && !software.pending(),"Destroyed movie identity restored a recycled cursor owner");
+        }
+        {
+            struct Window {
+                WNDCLASSW type{};
+                HWND handle=nullptr;
+                HCURSOR previous=GetCursor();
+                Window() {
+                    type.lpfnWndProc=&DefWindowProcW;type.hInstance=GetModuleHandleW(nullptr);
+                    type.lpszClassName=L"OutlastVRCursorRegression";type.hCursor=LoadCursorA(nullptr,IDC_ARROW);
+                    if (!RegisterClassW(&type)) throw std::runtime_error("Cannot register cursor fixture window");
+                    handle=CreateWindowExW(0,type.lpszClassName,L"",WS_OVERLAPPEDWINDOW,
+                        0,0,100,100,nullptr,nullptr,type.hInstance,nullptr);
+                    if (!handle) throw std::runtime_error("Cannot create hidden cursor fixture window");
+                }
+                ~Window() {DestroyWindow(handle);UnregisterClassW(type.lpszClassName,type.hInstance);SetCursor(previous);}
+            } window;
+            simulated_foreground=window.handle;
+            policy.menu_pointer(true);
+            auto message=[&] {SendMessageW(window.handle,WM_SETCURSOR,
+                reinterpret_cast<WPARAM>(window.handle),MAKELPARAM(HTCLIENT,WM_MOUSEMOVE));};
+            message();
+            require(GetCursor()!=nullptr,"Unfixed default-window cursor fixture did not display its class cursor");
+            {
+                olvr::OutlastWindowCursor hook(window.handle,policy,&focused_client);
+                message();
+                require(GetCursor()==nullptr,"Default window processing bypassed native-import cursor suppression");
+                SetCursor(window.type.hCursor);
+                require(SendNotifyMessageW(window.handle,WM_SETCURSOR,reinterpret_cast<WPARAM>(window.handle),
+                    MAKELPARAM(HTCLIENT,WM_MOUSEMOVE))!=FALSE,"Cannot queue cursor refresh fixture");
+                require(GetCursor()==nullptr,"Native cursor refresh bypassed window-level suppression");
+                policy.menu_pointer(false);message();
+                require(GetCursor()!=nullptr,"Closing VR pointer left the native cursor hidden");
+                policy.menu_pointer(true);simulated_foreground=nullptr;message();
+                require(GetCursor()!=nullptr,"Unfocused native window hid the desktop cursor");
+                simulated_foreground=window.handle;
+                simulated_client=false;message();
+                require(GetCursor()!=nullptr,"Native menu hid the cursor outside its owned client rectangle");
+                simulated_client=true;
+            }
+            message();
+            require(GetCursor()!=nullptr,"Removing the cursor hook did not restore default window behavior");
+            policy.menu_pointer(false);
+        }
         const RECT rectangle{100,100,900,700};
         for (const auto caller:{base,base+12345,base+extent-1}) {
             require(policy.owns(caller));

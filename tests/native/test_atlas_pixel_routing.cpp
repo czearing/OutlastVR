@@ -2,12 +2,22 @@
 #include "d3d9_shader_variants.h"
 #include "outlast_target_roles.h"
 #include "test_d3d9_state_snapshot.h"
+#include "isolated_vtable_entry.h"
 #ifdef OLVR_ISOLATED_9ON12
 #include "isolated_d3d12_counter.h"
 #endif
 #include <iostream>
 
 using namespace olvr;
+namespace {
+using PixelRead=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DPixelShader9**);
+PixelRead original_pixel_read=nullptr;
+unsigned pixel_reads=0;
+HRESULT WINAPI count_pixel_read(IDirect3DDevice9* device,IDirect3DPixelShader9** pixel) {
+    ++pixel_reads;
+    return original_pixel_read(device,pixel);
+}
+}
 
 int main(int argc,char** argv) {
     try {
@@ -146,6 +156,21 @@ int main(int argc,char** argv) {
         if (!fault_atlas && (&linear_pipeline==&pipeline ||
             &variants.current(fault_material?3:1,!fault_camera,false,!fault_scissor,true)!=&pipeline))
             throw std::runtime_error("Native point/linear filtering shared or lost its shader cache variant");
+        if (mode.empty()) {
+            auto** table=*reinterpret_cast<void***>(&device);
+            original_pixel_read=reinterpret_cast<PixelRead>(table[108]);
+            IsolatedVtableEntry reads;
+            reads.install(&table[108],reinterpret_cast<void*>(&count_pixel_read));
+            pixel_reads=0;
+            Com<IDirect3DPixelShader9> selected;
+            const auto mask=variants.bound_atlas_samplers(&selected);
+            auto& reused=variants.current(mask,true,false,true,true,false,false,selected.get());
+            if (pixel_reads!=1 || &reused!=&pipeline || selected.get()!=pixel.get())
+                throw std::runtime_error("Draw selection repeated a captured pixel-shader query or changed its variant");
+            auto& queried=variants.current(mask,true,false,true,true);
+            if (pixel_reads!=2 || &queried!=&reused)
+                throw std::runtime_error("Uncaptured draw selection skipped its required bound-shader query");
+        }
         for (UINT slot=2;slot<15;++slot) {
             gpu_check(device.SetTexture(slot,material.get()),"Seed unused caller lookup-slot texture");
             for (const auto filter:{D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER})

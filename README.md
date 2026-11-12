@@ -53,6 +53,10 @@ Default right-handed bindings:
 Button names follow your controller's OpenXR bindings. Index/Vive/WMR profile
 support varies; see [compatibility](https://github.com/czearing/OutlastVR/blob/master/docs/compatibility.md).
 
+VR hints use controller-neutral action names, currently in English. Primary means
+the lower face button (A/X on Touch, A on Index); secondary means the upper face
+button (B/Y on Touch, B on Index). Hints follow left-handed mode.
+
 On Vive/WMR profiles without active face buttons, click the stick/pad upward
 for primary or downward for secondary. Horizontal/center clicks retain
 sprint/filter. If the runtime exposes no menu binding, press both secondary
