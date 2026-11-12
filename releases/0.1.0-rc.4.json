@@ -1,0 +1,9 @@
+{
+  "version": "0.1.0-rc.4",
+  "changes": [
+    "Fixed unwanted grabs or menu clicks when returning to the game."
+  ],
+  "known_issues": [
+    "Physical camcorder controls remain experimental and are off by default."
+  ]
+}

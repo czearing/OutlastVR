@@ -88,6 +88,11 @@ jobs:
       contents: write
       actions: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generate player release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 tools/release_notes.py --tag "$RELEASE_TAG" --output release-notes.md
       - name: Download verified build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -100,6 +105,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          args=(--verify-tag --title "Outlast VR $RELEASE_TAG" --generate-notes)
+          args=(--verify-tag --title "Outlast VR $RELEASE_TAG" --notes-file release-notes.md)
           if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
           gh release create "$RELEASE_TAG" release/*.zip release/*.sha256 "${args[@]}"

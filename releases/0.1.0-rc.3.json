@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0-rc.3",
+  "changes": [
+    "Reduced CPU overhead when drawing repeated geometry.",
+    "Fixed grabbing the experimental camcorder accidentally triggering other interactions.",
+    "Added an option to keep the original item pickup animations."
+  ],
+  "known_issues": [
+    "Physical camcorder controls remain experimental and are off by default."
+  ]
+}
