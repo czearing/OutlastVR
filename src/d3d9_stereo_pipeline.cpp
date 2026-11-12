@@ -111,6 +111,7 @@ void D3D9StereoPipeline::release_device_resources() noexcept {
     eye_capacity_ = 0;
     cached_eye_stream_ = 0;
     index_capacity_ = vertex_capacity_ = 0;
+    sequential_index_count_ = 0;
     index_format_ = D3DFMT_UNKNOWN;
 }
 
@@ -241,7 +242,11 @@ UINT D3D9StereoPipeline::element_count(UINT topology, UINT primitive_count) cons
 void D3D9StereoPipeline::prepare_indices(const void* data, UINT count, D3DFORMAT format) {
     if (format != D3DFMT_INDEX16 && format != D3DFMT_INDEX32)
         throw std::invalid_argument("Converted index format must be 16-bit or 32-bit");
+    if (!data && format!=D3DFMT_INDEX32)
+        throw std::invalid_argument("Generated indices require the 32-bit converted format");
     const auto bytes = count * (format == D3DFMT_INDEX16 ? sizeof(WORD) : sizeof(DWORD));
+    if (!data && count<=sequential_index_count_) return;
+    sequential_index_count_=0;
     if (!converted_indices_.get() || bytes > index_capacity_ || format != index_format_) {
         converted_indices_.reset();
         index_capacity_ = 0;
@@ -260,6 +265,7 @@ void D3D9StereoPipeline::prepare_indices(const void* data, UINT count, D3DFORMAT
         for (UINT index = 0; index < count; ++index)
             static_cast<DWORD*>(pointer)[index] = index;
     gpu_check(converted_indices_->Unlock(), "Unlock converted index data");
+    if (!data) sequential_index_count_=count;
 }
 
 void D3D9StereoPipeline::prepare_declaration() {

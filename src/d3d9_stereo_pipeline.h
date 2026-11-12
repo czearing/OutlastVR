@@ -109,6 +109,7 @@ private:
     UINT eye_capacity_ = 0;
     UINT cached_eye_stream_ = 0;
     UINT index_capacity_ = 0;
+    UINT sequential_index_count_ = 0;
     UINT vertex_capacity_ = 0;
     D3DFORMAT index_format_ = D3DFMT_UNKNOWN;
     IndexedStereoPlan indexed_plan_{};

@@ -69,10 +69,11 @@ if(OLVR_GPU_TESTS)
     add_test(NAME test_material_alternate_varying COMMAND test_tracked_uniforms --material-alternate-varying)
     add_test(NAME test_material_full_samplers COMMAND test_tracked_uniforms --material-full-samplers)
     add_test(NAME test_material_camera_projection COMMAND test_tracked_uniforms --material-camera-only-projection)
+    add_test(NAME test_converted_index_cache COMMAND test_tracked_uniforms --index-cache)
     set_tests_properties(test_material_camera_precision test_material_world_position
         test_material_world_position_native test_material_world_position_precision
         test_material_alternate_varying test_material_full_samplers
-        test_material_camera_projection
+        test_material_camera_projection test_converted_index_cache
         PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     olvr_test(test_openxr_session)
     target_compile_definitions(test_openxr_session PRIVATE OLVR_ISOLATED_9ON12)

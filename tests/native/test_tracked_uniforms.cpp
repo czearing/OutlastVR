@@ -10,6 +10,36 @@
 
 using namespace olvr;
 
+#ifdef OLVR_ISOLATED_9ON12
+class IndexUploadCounter {
+    using Lock=HRESULT (WINAPI*)(IDirect3DIndexBuffer9*,UINT,UINT,void**,DWORD);
+    Com<IDirect3DIndexBuffer9> example_;
+    IsolatedVtableEntry entry_;
+    Lock original_=nullptr;
+    static inline IndexUploadCounter* active_=nullptr;
+    static HRESULT WINAPI lock(IDirect3DIndexBuffer9* buffer,UINT offset,UINT size,void** data,DWORD flags) {
+        ++active_->uploads;
+        return active_->original_(buffer,offset,size,data,flags);
+    }
+public:
+    UINT uploads=0;
+    explicit IndexUploadCounter(IDirect3DDevice9& device) {
+        if (active_) throw std::logic_error("Overlapping isolated index upload counters");
+        gpu_check(device.CreateIndexBuffer(12,D3DUSAGE_DYNAMIC|D3DUSAGE_WRITEONLY,D3DFMT_INDEX32,
+            D3DPOOL_DEFAULT,example_.put(),nullptr),"Create isolated index upload counter");
+        void** table=nullptr;
+        std::memcpy(&table,example_.get(),sizeof(table));
+        original_=reinterpret_cast<Lock>(table[11]);
+        entry_.install(&table[11],reinterpret_cast<void*>(&lock));
+        active_=this;
+    }
+    ~IndexUploadCounter() {
+        entry_.detach();
+        active_=nullptr;
+    }
+};
+#endif
+
 int main(int argc,char** argv) {
     try {
         const bool overwrite=argc==2 && std::string(argv[1])=="--burst-fault-overwrite";
@@ -19,10 +49,13 @@ int main(int argc,char** argv) {
         const bool cache_invalidation=argc==2 && std::string(argv[1])=="--cache-invalidation";
         const bool declaration_cache=argc==2 && std::string(argv[1])=="--declaration-cache";
         const bool benchmark=argc==2 && std::string(argv[1])=="--cpu-benchmark";
+        const bool index_cache_fault=argc==2 && std::string(argv[1])=="--fault-index-cache-stale";
+        const bool index_cache=index_cache_fault || (argc==2 && std::string(argv[1])=="--index-cache");
+        const unsigned frames=index_cache?12:6;
         const bool caller_fault=argc==2 && std::string(argv[1])=="--fault-caller-state";
         const bool caller_state=caller_fault || (argc==2 && std::string(argv[1])=="--caller-state");
         constexpr unsigned benchmark_draws=3000;
-        std::array<double,6> submission_us{};
+        std::vector<double> submission_us(frames);
         const bool material_fault=argc==2 && std::string(argv[1])=="--fault-material-untracked";
         const bool camera_only_fault=argc==2 && std::string(argv[1])=="--fault-material-camera-only";
         const bool camera_projection=argc==2 && std::string(argv[1])=="--material-camera-only-projection";
@@ -55,7 +88,8 @@ int main(int argc,char** argv) {
         const bool billboard=billboard_fault || billboard_locked || billboard_policy ||
             (argc==2 && std::string(argv[1])=="--billboard-camera");
         if (argc!=1 && !fault && !burst && !native_columns && !context_change && !upload_cache &&
-            !cache_invalidation && !declaration_cache && !benchmark && !material && !motion && !caller_state && !billboard)
+            !cache_invalidation && !declaration_cache && !benchmark && !index_cache &&
+            !material && !motion && !caller_state && !billboard)
             throw std::invalid_argument("Unknown tracked-uniform control");
         constexpr UINT width=64,height=16;
         const UINT target_height=burst?height*6:height;
@@ -308,12 +342,15 @@ int main(int argc,char** argv) {
         pipeline.set_camera_directions_view_dependent(!billboard_locked || billboard_lock_fault);
         pipeline.set_native_view_columns(native_columns && !native_fault);
         const float quad[][2]{{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
+        std::array<std::array<float,2>,18> repeated_quad{};
+        for (unsigned index=0;index<repeated_quad.size();++index)
+            std::copy_n(quad[index%6],2,repeated_quad[index].begin());
         Com<IDirect3DVertexBuffer9> indexed_vertices;
         Com<IDirect3DVertexBuffer9> fvf_vertices;
         Com<IDirect3DIndexBuffer9> indexed_indices;
         Com<IDirect3DPixelShader9> alternate_caller_pixel;
         Com<IDirect3DVertexDeclaration9> alternate_declaration,conflicting_declaration;
-        if (declaration_cache || caller_state) {
+        if (declaration_cache || caller_state || index_cache) {
             const auto patched=sm3::patch_pair(
                 sm3::Words(static_cast<const std::uint32_t*>(vertex_code->GetBufferPointer()),
                     static_cast<const std::uint32_t*>(vertex_code->GetBufferPointer())+vertex_code->GetBufferSize()/4),
@@ -363,13 +400,16 @@ int main(int argc,char** argv) {
 #ifdef OLVR_ISOLATED_9ON12
         IsolatedD3D12DrawCounter counter(isolated.translation_device());
         counter.reset();
+        std::unique_ptr<IndexUploadCounter> index_uploads;
+        if (index_cache || benchmark) index_uploads=std::make_unique<IndexUploadCounter>(device);
 #endif
         UINT pixels=0;
         if (burst) {
             gpu_check(device.Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0),"Clear reconstruction burst");
             gpu_check(device.BeginScene(),"Begin unfenced reconstruction burst");
         }
-        for (unsigned serial=0;serial<6;++serial) {
+        for (unsigned serial=0;serial<frames;++serial) {
+            if (index_cache && serial==9) pipeline.release_device_resources();
             if (billboard_policy) pipeline.set_camera_directions_view_dependent(serial%2==0);
             if (cache_invalidation) {
                 if (serial==2) {
@@ -466,7 +506,25 @@ int main(int argc,char** argv) {
             }
             const auto begin=std::chrono::steady_clock::now();
             for (unsigned repeat=0;repeat<(benchmark?benchmark_draws:1u);++repeat) {
-                const auto submission=declaration_cache || caller_state?
+                SubmissionResult submission{};
+                if (index_cache) {
+                    if (serial==2 || serial==7 || (index_cache_fault && serial==3)) {
+                        const std::array<DWORD,6> indices32{};
+                        const std::array<WORD,6> indices16{};
+                        submission=pipeline.draw_indexed_up({D3DPT_TRIANGLELIST,0,0,6,0,2},
+                            serial==7?static_cast<const void*>(indices16.data()):indices32.data(),
+                            serial==7?sizeof(indices16):sizeof(indices32),
+                            serial==7?D3DFMT_INDEX16:D3DFMT_INDEX32,quad,sizeof(quad),sizeof(quad[0]),views);
+                    } else if (serial==10) {
+                        gpu_check(device.SetStreamSource(0,indexed_vertices.get(),0,sizeof(quad[0])),
+                            "Bind native non-indexed cache fixture");
+                        submission=pipeline.draw_non_indexed(D3DPT_TRIANGLELIST,0,2,views);
+                    } else {
+                        const unsigned vertices=serial==0 || serial==4?12:serial==6?18:6;
+                        submission=pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,vertices/3,
+                            repeated_quad.data(),vertices*sizeof(quad[0]),sizeof(quad[0]),views);
+                    }
+                } else submission=declaration_cache || caller_state?
                     pipeline.draw_indexed({D3DPT_TRIANGLELIST,0,0,6,0,2},views):
                     pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,2,quad,sizeof(quad),sizeof(quad[0]),views);
                 if (!submission.succeeded())
@@ -524,6 +582,14 @@ int main(int argc,char** argv) {
                     scale(rotated_billboard(billboard_up),.5f)),scale(origin,.01f));
                 const auto color=reinterpret_cast<const DWORD*>(
                     static_cast<const char*>(lock.pBits)+y*lock.Pitch)[x];
+                if (index_cache && (serial==2 || serial==7)) {
+                    if (correct && color!=0xff000000)
+                        std::cerr<<"Index overwrite mismatch frame="<<serial<<" x="<<x<<" y="<<y
+                            <<" color="<<color<<'\n';
+                    correct &= color==0xff000000;
+                    ++pixels;
+                    continue;
+                }
                 for (unsigned axis=0;axis<3;++axis) {
                     auto project=[&](const Matrix4& matrix,unsigned row) {
                         const float v[]{world.x,world.y,world.z,1};
@@ -554,7 +620,8 @@ int main(int argc,char** argv) {
                 ++pixels;
             }
             gpu_check(readback->UnlockRect(),"Unlock reconstructed eye images");
-            if (!correct) throw std::runtime_error("Tracked inverse matrices, fog camera or view rotation content mismatch");
+            if (!correct) throw std::runtime_error("Tracked inverse matrices, fog camera or view rotation content mismatch; frame="+
+                std::to_string(serial));
 #ifdef OLVR_ISOLATED_9ON12
             const auto draws=benchmark?benchmark_draws:burst?6u:1u;
             if (counter.indexed_calls!=draws || counter.plain_calls || counter.instances!=draws*2)
@@ -608,14 +675,21 @@ int main(int argc,char** argv) {
         if (benchmark && (pipeline.view_record_builds()!=1 ||
             pipeline.view_record_cache_hits()!=6*benchmark_draws-1 || pipeline.declaration_builds()!=1))
             throw std::runtime_error("Hot-path benchmark did not exercise unchanged-input CPU caches");
+#ifdef OLVR_ISOLATED_9ON12
+        if (index_cache && index_uploads->uploads!=8)
+            throw std::runtime_error("Generated-index reuse missed prefix, overwrite, growth, format or reset invalidation; uploads="+
+                std::to_string(index_uploads->uploads));
+        if (benchmark && index_uploads->uploads!=1)
+            throw std::runtime_error("Unchanged generated indices were uploaded more than once");
+#endif
 #endif
         if (fault) throw std::runtime_error("Untracked inverse reconstruction incorrectly passed");
         if (caller_state) std::cout<<"PASS: precise_caller_state_checks=6; exact_caller_state_preserved; every_float_integer_boolean_shader_constant; all_20_samplers_and_streams; declaration_FVF_switches; changed_caller_literal_mask; viewport_scissor_render_state; ";
-        std::cout<<"PASS: per-eye vertex/pixel inverse reconstruction, fog camera, view-to-world rotation, original VTF and constant restoration; frames=6; pixels="
+        std::cout<<"PASS: per-eye vertex/pixel inverse reconstruction, fog camera, view-to-world rotation, original VTF and constant restoration; frames="<<frames<<"; pixels="
             <<pixels<<(benchmark?"; one draw/two instances per submission":"; one draw/two instances per frame");
 #ifdef OLVR_ISOLATED_9ON12
-        std::cout<<"; native_d3d12_draws="<<(benchmark?6*benchmark_draws:6)
-            <<"; native_d3d12_instances="<<(benchmark?12*benchmark_draws:12);
+        std::cout<<"; native_d3d12_draws="<<(benchmark?6*benchmark_draws:frames)
+            <<"; native_d3d12_instances="<<(benchmark?12*benchmark_draws:frames*2);
 #endif
         if (burst) std::cout<<"; unfenced_draw_burst=6; gpu_readbacks=1";
         if (shadow) std::cout<<"; screen_to_shadow_and_light; native_columns; independent_world_projector_oracle";
@@ -626,6 +700,10 @@ int main(int argc,char** argv) {
         if (upload_cache) std::cout<<"; CPU_view_builds=4; CPU_view_cache_hits=2; declaration_builds=2";
         if (cache_invalidation) std::cout<<"; identical_eye_and_uniform_inputs; context_columns_reset_invalidated; CPU_view_builds=5; CPU_view_cache_hits=1; declaration_builds=2; view_uploads=4";
         if (declaration_cache) std::cout<<"; declaration_builds=4; spare_stream_changed; fresh_stream_frequencies; conflicting_declaration_rejected";
+        if (index_cache) std::cout<<"; cached_prefix_and_native_nonindexed; supplied_indices_growth_format_reset_invalidated";
+#ifdef OLVR_ISOLATED_9ON12
+        if (index_uploads) std::cout<<"; index_buffer_locks="<<index_uploads->uploads;
+#endif
         if (material && !camera_only) std::cout<<"; material_camera_rebase; pixel_forward_projection; large_head_turns";
         if (material_origin) std::cout<<"; large_world_origin; translated_material_precision";
         if (camera_only) std::cout<<"; material_camera_only; no_world_position_varying; original_camera_preserved; large_head_turns";
