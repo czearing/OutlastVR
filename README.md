@@ -74,15 +74,28 @@ With `toggle_sprint=true`, click again or stop moving to stop sprinting.
 ```ini
 [experimental]
 physical_camcorder=false
+instant_pickups=true
 ```
 
-Leave this off for normal play. The experimental camcorder uses right-handed
-controls and the game's night vision. The default filter does not use batteries.
+Leave `physical_camcorder` off for normal play. The experimental camcorder can
+be grabbed with either hand near its chest holster and uses the game's night
+vision. Its grip is reserved while held, so grabbing it does not also interact
+with a door/item. Both-handed controls are covered by automated tests; physical
+visibility, optical alignment and comfort still require headset acceptance.
+The default filter does not use batteries.
+
+Set `instant_pickups=false` to retain native inventory pickup animations and
+completion. Native item admission, inventory events and scripted interactions
+are not bypassed by either setting.
 
 ## Development
 
 [Building and testing](https://github.com/czearing/OutlastVR/blob/master/docs/building.md) · [Contributing](https://github.com/czearing/OutlastVR/blob/master/CONTRIBUTING.md) ·
 [Report a bug](https://github.com/czearing/OutlastVR/issues/new/choose)
+
+The [unattended acceptance runner](https://github.com/czearing/OutlastVR/blob/master/docs/testing.md#unattended-acceptance)
+checks actual DLL/GPU output without launching Outlast. It cannot certify
+headset ergonomics, performance or campaign completion.
 
 MIT-licensed original code. See [third-party notices](THIRD_PARTY_NOTICES.md).
 Not affiliated with or endorsed by Red Barrels.

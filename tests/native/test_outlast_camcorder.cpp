@@ -1,4 +1,5 @@
 #include "outlast_camcorder.h"
+#include "outlast_motion_controls.h"
 #include <iostream>
 #include <string>
 
@@ -29,6 +30,49 @@ int main(int argc,char** argv) {
         const EyePose head{{0,1.7f,0},{0,0,0,1}};
         const auto chest=camcorder_holster(head,{0,0,0,1});
         require(close(chest.position,{.11f,1.38f,-.16f}),"Chest attachment is not measured from the head");
+        for (unsigned holding=0;holding<2;++holding) {
+            CamcorderFrame visible{};visible.visible=true;visible.pose=chest;
+            auto hands=tracked(chest.position);
+            OutlastMotionControls controls;
+            OutlastComfortSettings options;options.left_handed=holding==0;
+            controls.configure(options);
+            hands.hands[holding].aim_tracked=true;
+            XINPUT_STATE output{},physical{};
+            controls.publish(hands,1000);
+            hands.hands[holding].squeeze=1;
+            controls.publish(hands,2000);
+            require(camcorder_claims_grip(visible,1000,hands,2001,holding),
+                "Chest-camera acquisition lost the first native input poll");
+            controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,2001,false,
+                !camcorder_claims_grip(visible,1000,hands,2001,holding));
+            require(!(output.Gamepad.wButtons&XINPUT_GAMEPAD_X),
+                "Grabbing the physical camera also activated a native item/door");
+            visible.held=true;visible.hand=int(holding);
+            hands.hands[holding].grip.position.x+=1;
+            require(camcorder_claims_grip(visible,2000,hands,2001,holding) &&
+                !camcorder_claims_grip(visible,2000,hands,2001,1-holding),
+                "Held-camera ownership was lost or consumed the free hand");
+            require(!camcorder_claims_grip(visible,2000,hands,1999,holding) &&
+                !camcorder_claims_grip(visible,2000,hands,252001,holding),
+                "Stale physical camera state consumed a current action");
+            hands.focused=false;
+            require(!camcorder_claims_grip(visible,2000,hands,2001,holding),
+                "Unfocused camera claimed a gameplay grip");
+            hands.focused=true;hands.hands[holding].grip_tracked=false;
+            require(!camcorder_claims_grip(visible,2000,hands,2001,holding),
+                "An untracked camera hand claimed gameplay use");
+            hands.hands[holding].grip_tracked=true;visible.held=false;
+            controls.publish(hands,3000);
+            controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,3001,false,true);
+            require(!(output.Gamepad.wButtons&XINPUT_GAMEPAD_X),
+                "Consumed camera grip replayed when the camera returned to its holster");
+            hands.hands[holding].squeeze=0;controls.publish(hands,4000);
+            hands.hands[holding].squeeze=1;controls.publish(hands,5000);
+            controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,5001,false,
+                !camcorder_claims_grip(visible,5000,hands,5001,holding));
+            require((output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0,
+                "A fresh free-hand grip could not interact after releasing the camera");
+        }
         OutlastCamcorder camera;
         auto frame=tracked(chest.position);
         CamcorderNativeState native{true,true,false,false};

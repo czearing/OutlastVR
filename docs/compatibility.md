@@ -32,7 +32,12 @@ is available, press both secondary actions to pause.
 - The default night-vision filter does not use batteries or display the native
   camera HUD.
 - The physical camcorder has visibility issues and is disabled by default.
-  Enabling it requires right-handed controls.
+  Either holding hand and left-handed controls are supported by the experimental
+  input/model paths, not yet accepted through headset playtesting. Keep
+  `[experimental] physical_camcorder=false` for the supported preview defaults.
+- Inventory pickups complete immediately after native admission by default.
+  `[experimental] instant_pickups=false` restores native pickup animation and
+  completion as a rollback. Doors and other scripted interactions remain native.
 - Interaction uses the game's controls, not free physics grabbing or finger
   collision. Settings are edited in the INI; there is no in-VR settings menu.
 - The desktop mirror shows the left eye.

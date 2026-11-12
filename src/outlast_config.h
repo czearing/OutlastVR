@@ -21,6 +21,7 @@ struct OutlastConfig {
     std::filesystem::path game_executable;
     std::filesystem::path openxr_loader;
     bool physical_camcorder=false;
+    bool instant_pickups=true;
     OutlastComfortSettings comfort;
 };
 
@@ -53,10 +54,12 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         const auto key=section+"."+trim(line.substr(0,split));
         auto value=trim(line.substr(split+1));
         if (!seen.insert(key).second) throw error("duplicate setting "+key);
-        if (key=="experimental.physical_camcorder" || key=="vr.seated" || key=="vr.left_handed" ||
+        if (key=="experimental.physical_camcorder" || key=="experimental.instant_pickups" ||
+            key=="vr.seated" || key=="vr.left_handed" ||
             key=="vr.toggle_sprint") {
             if (value!="true" && value!="false") throw error("expected true or false");
             if (key=="experimental.physical_camcorder") result.physical_camcorder=value=="true";
+            else if (key=="experimental.instant_pickups") result.instant_pickups=value=="true";
             else if (key=="vr.seated") result.comfort.seated=value=="true";
             else if (key=="vr.left_handed") result.comfort.left_handed=value=="true";
             else result.comfort.toggle_sprint=value=="true";
@@ -92,8 +95,6 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         } else throw error("unknown setting "+key);
     }
     if (input.bad()) throw std::runtime_error("Cannot finish reading OutlastVR.ini");
-    if (result.physical_camcorder && result.comfort.left_handed)
-        throw std::invalid_argument("Experimental physical camcorder requires right-handed controls");
     return result;
 }
 

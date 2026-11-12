@@ -115,6 +115,9 @@ public:
                 extent_=std::min(extent_,available/extent);
             }
         }
+        // These DLL fixtures have no interactive movie owner: their canvas is passive HUD.
+        constexpr double radians=3.14159265358979323846/180;
+        extent_=std::min({extent_,2*std::tan(25*radians),2*std::tan(35*radians)});
     }
     int label(unsigned eye,unsigned x,unsigned y,double& margin) const {
         const auto& f=mock.views[eye].fov;

@@ -11,8 +11,8 @@ struct OutlastNativeUseContext {UINT64 clock=0;unsigned basic=0,special=0;};
 
 using OutlastPickupComplete=void(WINAPI*)(void*);
 inline bool outlast_complete_controller_pickup(void* hero,INT action,UINT64 result,
-                                               bool controller,OutlastPickupComplete complete) {
-    if (!controller || !action || !result) return false;
+                                               bool controller,OutlastPickupComplete complete,bool enabled=true) {
+    if (!enabled || !controller || !action || !result) return false;
     if (!hero || !complete) throw std::invalid_argument("Missing native pickup completion binding");
     const auto* bytes=static_cast<const unsigned char*>(hero);
     if (bytes[0x7bc]!=2 || bytes[0x7bd]!=0x31) return false;

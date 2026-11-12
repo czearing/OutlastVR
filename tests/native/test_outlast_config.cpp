@@ -7,6 +7,9 @@ int main() {
         auto parse=[](const std::string& text) {std::istringstream input(text);return parse_outlast_config(input);};
         auto require=[](bool value) {if (!value) throw std::runtime_error("Configuration regression");};
         require(!parse("").physical_camcorder);
+        require(parse("").instant_pickups && !parse("[experimental]\ninstant_pickups=false\n").instant_pickups);
+        require(parse("[experimental]\nphysical_camcorder=true\ninstant_pickups=true\n"
+            "[vr]\nleft_handed=true\n").comfort.left_handed);
         require(!parse("[experimental]\nphysical_camcorder=false\n").physical_camcorder);
         require(parse("\xef\xbb\xbf; UTF-8 BOM\r\n[experimental]\r\nphysical_camcorder=true\r\n").physical_camcorder);
         const auto paths=parse("[game]\nexecutable=\"D:\\Steam Library\\Outlast\\OLGame.exe\"\n"
@@ -25,8 +28,8 @@ int main() {
                 "[vr]\nsnap_turn_degrees=5","[vr]\nsnap_turn_degrees=nan",
                 "[vr]\nworld_scale=0","[vr]\nworld_scale=1.0junk",
                 "[vr]\nvignette_strength=2","[vr]\nseated=yes","[vr]\nmovement_reference=wrong",
-                "[vr]\ntoggle_sprint=yes",
-                "[experimental]\nphysical_camcorder=true\n[vr]\nleft_handed=true"}) {
+                "[vr]\ntoggle_sprint=yes","[experimental]\ninstant_pickups=yes",
+                "[experimental]\ninstant_pickups=true\ninstant_pickups=false"}) {
             bool rejected=false;
             try {parse(invalid);} catch (const std::invalid_argument&) {rejected=true;}
             require(rejected);

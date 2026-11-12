@@ -829,6 +829,12 @@ class Runtime {
         tracking.backward=turn(tracking.backward);
         return tracking;
     }
+    bool camera_claims_use(const MotionFrame& motion,UINT64 now) {
+        if (!camcorder_capture_) return false;
+        std::lock_guard<std::mutex> lock(camcorder_mutex_);
+        return camcorder_claims_grip(physical_camera_.frame,physical_camera_.clock,
+            motion,now,config_.comfort.primary_hand());
+    }
     std::optional<OutlastUseRay> controller_use_ray(void* hero,UINT64 now) {
         if (GetCurrentThreadId()!=input_thread_.load(std::memory_order_acquire)) {
             if (!native_use_thread_warned_.exchange(true,std::memory_order_acq_rel))
@@ -844,6 +850,7 @@ class Runtime {
         if (!request || request->native.hero!=reinterpret_cast<std::uintptr_t>(hero) ||
             !current.focused || !current.hands[config_.comfort.primary_hand()].aim_tracked ||
             native_interactive_menu_.load(std::memory_order_acquire) ||
+            camera_claims_use(current,now) ||
             menu_state_() || field<BYTE>(hero,0x7bc)!=0 || field<BYTE>(hero,0x7bd)!=0)
             return {};
         return outlast_controller_use_ray(native_body_tracking(hero,*request),request->motion,
@@ -864,7 +871,8 @@ class Runtime {
         const auto special=field<BYTE>(hero,0x7bd);
         const auto completion_begin=input_clock();
         const bool completed=original==original_pickup_ &&
-            outlast_complete_controller_pickup(hero,action,result,ray.has_value(),complete_pickup_);
+            outlast_complete_controller_pickup(hero,action,result,ray.has_value(),complete_pickup_,
+                config_.instant_pickups);
         const auto completion_end=completed?input_clock():0;
         scope.reset();
         const bool restored=field<std::array<unsigned char,sizeof(Vec3)>>(hero,0x30e4)==before_origin &&
@@ -2116,6 +2124,8 @@ class Runtime {
                     body->motion.hands[r.config_.comfort.primary_hand()].aim_tracked;
                 use_ready=outlast_native_use_action_ready(body_ready,r.native_use_context_,clock);
             }
+            if (index==0 && r.camcorder_capture_ &&
+                r.camera_claims_use(r.motion_controls_.sample(clock),clock)) use_ready=false;
             const auto status=r.motion_controls_.state(index,output,result,physical,clock,menu_pointer,use_ready,
                 r.test_ || r.config_.physical_camcorder);
             if (index==0 && output && status==ERROR_SUCCESS) {
@@ -3927,6 +3937,8 @@ public:
             OutlastNativeImage image(module_path(nullptr));
             const auto mod_directory=module_path(own_module).parent_path();
             config_=load_outlast_config(mod_directory);
+            log("Configured experimental flights: instant_pickups="+std::string(config_.instant_pickups?"true":"false")+
+                "; physical_camcorder="+(config_.physical_camcorder?"true":"false"));
             motion_controls_.configure(config_.comfort);
             menu_pointer_hand_=config_.comfort.primary_hand();
             wchar_t mode[8]{};

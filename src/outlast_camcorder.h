@@ -16,6 +16,27 @@ struct CamcorderFrame {
     int hand=-1;
 };
 
+constexpr float camcorder_grab_radius=.18f;
+inline float camcorder_grab_distance_squared(const XrPosef& grip,EyePose camera) {
+    const Vec3 delta{grip.position.x-camera.position.x,grip.position.y-camera.position.y,
+        grip.position.z-camera.position.z};
+    const auto distance=dot(delta,delta);
+    if (!finite(delta) || !std::isfinite(distance))
+        throw std::invalid_argument("Nonfinite camcorder grab position");
+    return distance;
+}
+
+inline bool camcorder_claims_grip(const CamcorderFrame& camera,UINT64 published,
+    const MotionFrame& motion,UINT64 now,unsigned hand) {
+    if (hand>=2) throw std::invalid_argument("Invalid camcorder interaction hand");
+    if (!camera.visible || !motion.focused || !motion.hands[hand].grip_tracked ||
+        now<published || now-published>250000) return false;
+    if (camera.held) return camera.hand==int(hand);
+    return motion.hands[hand].squeeze>.45f &&
+        camcorder_grab_distance_squared(motion.hands[hand].grip,camera.pose)<
+            camcorder_grab_radius*camcorder_grab_radius;
+}
+
 inline EyePose camcorder_offset(EyePose parent,Vec3 offset,Quaternion orientation={0,0,0,1}) {
     if (!finite(parent.position) || !finite(offset))
         throw std::invalid_argument("Nonfinite camcorder attachment position");
@@ -128,13 +149,10 @@ public:
             return result;
         }
         if (hand_<0) {
-            float nearest=.18f*.18f;
+            float nearest=camcorder_grab_radius*camcorder_grab_radius;
             for (unsigned hand=0;hand<2;++hand) {
                 if (!edge[hand]) continue;
-                const auto& p=motion.hands[hand].grip.position;
-                const Vec3 delta=add({p.x,p.y,p.z},scale(result.pose.position,-1));
-                if (!finite(delta)) throw std::invalid_argument("Nonfinite camcorder grab position");
-                const float distance=dot(delta,delta);
+                const float distance=camcorder_grab_distance_squared(motion.hands[hand].grip,result.pose);
                 if (distance<nearest) {hand_=int(hand);nearest=distance;}
             }
         }

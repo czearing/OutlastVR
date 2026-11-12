@@ -45,6 +45,8 @@ int main() {
                     const auto before=hero;
                     const auto calls=completions;
                     const bool eligible=basic==2 && special==0x31;
+                    require(!outlast_complete_controller_pickup(hero.data(),1,1,true,&complete_pickup,false) &&
+                        hero==before && completions==calls,"Disabled pickup flight changed native state");
                     require(outlast_complete_controller_pickup(hero.data(),1,1,true,&complete_pickup)==eligible,
                         "Instant pickup completed an unrelated native interaction");
                     require(completions==calls+unsigned(eligible),
@@ -62,6 +64,8 @@ int main() {
                     "Query-only, refused or non-controller pickup ran inventory completion");
             }
             rejects([&] {outlast_complete_controller_pickup(nullptr,1,1,true,&complete_pickup);});
+            require(!outlast_complete_controller_pickup(nullptr,1,1,true,nullptr,false),
+                "Disabled pickup flight required experimental native bindings");
             rejects([&] {outlast_complete_controller_pickup(hero.data(),1,1,true,nullptr);});
             selected=nullptr;std::memcpy(hero.data()+0x3648,&selected,sizeof(selected));
             bool missing=false;
