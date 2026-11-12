@@ -1,7 +1,10 @@
 #define XR_NO_PROTOTYPES
 #include "openxr_motion_input.h"
 #include "outlast_comfort.h"
+#include "outlast_motion_controls.h"
+#include "outlast_desktop_cursor.h"
 #include <iostream>
+#include <limits>
 #include <map>
 
 using namespace olvr;
@@ -32,13 +35,14 @@ struct Fake {
     bool focused=true,active=true,lost_left=false,bad_pose=false,bad_axis=false,partial_failure=false;
     std::array<bool,2> hand_active{{true,true}};
     std::array<bool,2> axis_active{{true,true}};
+    std::array<bool,2> trigger_active{{true,true}},squeeze_active{{true,true}};
     bool stale_fault=false,swap_fault=false,all_unsupported=false;
     std::string supported_profile;
     unsigned accepted_profiles=0;
     bool neutral_controls=false,estimated_left=false;
     bool face_buttons=true,menu_button=true,stick_buttons=true;
     bool fixture_crouch=false,fixture_notes=false,fixture_menu=false;
-    float fixture_use=0;
+    float fixture_use=0,fixture_left_use=0;
     std::array<float,2> fixture_grab{};
     bool fixture_nv=false,fixture_reload=false,fixture_jump=false,fixture_sprint=false;
     XrVector2f fixture_move{},fixture_turn{};
@@ -126,10 +130,13 @@ XrResult XRAPI_CALL pose_state(XrSession,const XrActionStateGetInfo* info,XrActi
 }
 XrResult XRAPI_CALL float_state(XrSession,const XrActionStateGetInfo* info,XrActionStateFloat* out) {
     query(info,XR_ACTION_TYPE_FLOAT_INPUT);
-    out->isActive=fake.active_hand(info->subactionPath);
+    const unsigned hand=fake.left(info->subactionPath)?0:1;
+    const bool trigger=fake.actions.at(info->action).first=="trigger";
+    out->isActive=fake.active_hand(info->subactionPath) &&
+        (trigger?fake.trigger_active[hand]:fake.squeeze_active[hand]);
     out->currentState=fake.neutral_controls?0:fake.left(info->subactionPath)?.25f:.75f;
-    if (fake.neutral_controls && !fake.left(info->subactionPath) &&
-        fake.actions.at(info->action).first=="trigger") out->currentState=fake.fixture_use;
+    if (fake.neutral_controls && trigger)
+        out->currentState=hand?fake.fixture_use:fake.fixture_left_use;
     if (fake.neutral_controls && fake.actions.at(info->action).first=="squeeze")
         out->currentState=fake.fixture_grab[fake.left(info->subactionPath)?0:1];
     return XR_SUCCESS;
@@ -236,12 +243,97 @@ int main(int argc,char** argv) {
         const bool sector_test=mode=="--fallback-gestures";
         const bool recovery_test=mode=="--button-recovery";
         const bool snap_recovery=mode=="--snap-recovery";
+        const bool analog_recovery=mode=="--analog-recovery";
         if (argc==2) {
             fake.stale_fault=std::strcmp(argv[1],"--fault-stale")==0;
             fake.swap_fault=std::strcmp(argv[1],"--fault-hands")==0;
-            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test || recovery_test || snap_recovery,
+            expect(fake.stale_fault || fake.swap_fault || pause_test || sector_test || recovery_test ||
+                snap_recovery || analog_recovery,
                 "Unknown motion control");
         } else expect(argc==1,"Invalid motion test arguments");
+        if (analog_recovery) {
+            unsigned scenarios=0;
+            for (unsigned hand=0;hand<2;++hand) for (bool trigger:{false,true})
+            for (unsigned interruption=0;interruption<4;++interruption) for (bool held_before:{false,true}) {
+                fake=Fake{};fake.neutral_controls=true;
+                auto& pressure=trigger?(hand?fake.fixture_use:fake.fixture_left_use):fake.fixture_grab[hand];
+                auto& available=trigger?fake.trigger_active[hand]:fake.squeeze_active[hand];
+                {
+                    OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                    OutlastMotionControls controls;
+                    OutlastComfortSettings options;options.left_handed=hand==0;controls.configure(options);
+                    ControllerMenuPress menu;
+                    XINPUT_STATE output{},physical{};
+                    auto sample=[&](XrTime time) {
+                        auto frame=input.sample(fake.base,time);
+                        controls.publish(frame,UINT64(time));
+                        controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,UINT64(time)+1);
+                        const bool clicked=menu.update(true,true,hand,frame.hands[hand].trigger);
+                        return std::pair<MotionFrame,bool>{frame,clicked};
+                    };
+                    auto value=[&](const MotionFrame& frame) {
+                        return trigger?frame.hands[hand].trigger:frame.hands[hand].squeeze;
+                    };
+                    sample(1000);pressure=held_before?1.f:0.f;
+                    expect(value(sample(2000).first)==pressure,"Initial analog action changed pressure");
+                    if (interruption==0) fake.focused=false;
+                    if (interruption==1) input.suspend();
+                    if (interruption==2) fake.hand_active[hand]=false;
+                    if (interruption==3) available=false;
+                    if (interruption!=1) sample(3000);
+                    pressure=1;fake.focused=true;fake.hand_active[hand]=true;available=true;
+                    for (const XrTime time:{4000,4100}) {
+                        const auto recovered=sample(time);
+                        expect(value(recovered.first)==0,
+                            "Unavailable analog action replayed a held/unseen press on recovery");
+                        expect(trigger?!recovered.second:!(output.Gamepad.wButtons&XINPUT_GAMEPAD_X),
+                            "Analog recovery synthesized a menu click or native item/door action");
+                    }
+                    pressure=.5f;
+                    expect(value(sample(4200).first)==0,"Partial analog release incorrectly rearmed the action");
+                    pressure=.25f;
+                    expect(value(sample(5000).first)==.25f,"A genuine low active sample failed to release the analog gate");
+                    pressure=.8f;
+                    const auto fresh=sample(6000);
+                    expect(value(fresh.first)==.8f &&
+                        (trigger?fresh.second:(output.Gamepad.wButtons&XINPUT_GAMEPAD_X)!=0),
+                        "A fresh analog press did not restore menu/native interaction");
+                }
+                expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                    "Analog recovery leaked controller resources");
+                ++scenarios;
+            }
+            fake=Fake{};fake.neutral_controls=true;
+            {
+                OpenXRMotionInput input(&resolve,fake.instance,fake.session);
+                input.sample(fake.base,1000);
+                fake.trigger_active[0]=false;
+                fake.fixture_left_use=fake.fixture_use=.8f;
+                fake.fixture_grab={.7f,.9f};
+                auto frame=input.sample(fake.base,2000);
+                expect(frame.hands[0].trigger==0 && frame.hands[1].trigger==.8f &&
+                    frame.hands[0].squeeze==.7f && frame.hands[1].squeeze==.9f,
+                    "One inactive float action disabled another hand or its independent grip");
+                fake.trigger_active[0]=true;
+                frame=input.sample(fake.base,3000);
+                expect(frame.hands[0].trigger==0 && frame.hands[1].trigger==.8f &&
+                    frame.hands[0].grip_tracked && frame.hands[0].aim_tracked,
+                    "An action-only interruption reused a held trigger or disabled valid poses");
+                fake.fixture_left_use=std::numeric_limits<float>::quiet_NaN();
+                bool invalid=false;
+                try {input.sample(fake.base,4000);}
+                catch (const std::runtime_error& error) {
+                    invalid=std::string(error.what())=="Invalid active controller trigger/squeeze value";
+                }
+                expect(invalid,"Rearming concealed an invalid active analog sample");
+            }
+            expect(fake.destroyed_spaces==4 && fake.destroyed_sets==1,
+                "Per-action recovery leaked controller resources");
+            std::cout<<"PASS: analog_action_recovery_scenarios="<<scenarios
+                <<"; both_hands; trigger_and_grip; focus_suspend_hand_action_activity; "
+                <<"held_and_unseen_presses; fresh_release_rearm; actual_menu_and_native_use_consumers\n";
+            return 0;
+        }
         if (snap_recovery) {
             unsigned scenarios=0;
             for (const bool left_handed:{false,true}) for (const bool whole_hand:{false,true})

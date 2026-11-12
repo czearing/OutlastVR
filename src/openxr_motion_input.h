@@ -38,6 +38,7 @@ class OpenXRMotionInput {
     enum class ClickBindings {unknown,face,fallback};
     mutable std::array<ClickBindings,2> click_bindings_{};
     mutable std::array<bool,2> primary_blocked_{},secondary_blocked_{},click_blocked_{};
+    mutable std::array<bool,2> trigger_blocked_{},squeeze_blocked_{};
     mutable bool menu_blocked_=false;
     mutable bool pause_consuming_=false,pause_armed_=true;
     mutable std::array<bool,2> pause_clicks_{};
@@ -82,14 +83,16 @@ class OpenXRMotionInput {
         info.subactionPath=hands_.at(hand);
         return info;
     }
-    float scalar(XrAction action,unsigned hand) const {
+    float scalar(XrAction action,unsigned hand,bool& blocked) const {
         const auto info=query(action,hand);
         XrActionStateFloat state{};state.type=XR_TYPE_ACTION_STATE_FLOAT;
         xr_check(GetActionStateFloat_(session_,&info,&state),"Read analog controller action");
-        if (!state.isActive) return 0;
+        if (!state.isActive) {blocked=true;return 0;}
         if (!std::isfinite(state.currentState) || state.currentState<0 || state.currentState>1)
             throw std::runtime_error("Invalid active controller trigger/squeeze value");
-        return state.currentState;
+        // An unavailable action is not a physical release of a held grip/trigger.
+        if (state.currentState<=.4f) blocked=false;
+        return blocked?0:state.currentState;
     }
     bool button(XrAction action,unsigned hand,bool* available=nullptr) const {
         const auto info=query(action,hand);
@@ -257,7 +260,8 @@ public:
             auto& value=frame.hands[hand];
             value.grip_tracked=pose(grip_,grips_[hand],hand,base,time,value.grip);
             value.aim_tracked=pose(aim_,aims_[hand],hand,base,time,value.aim);
-            value.trigger=scalar(trigger_,hand);value.squeeze=scalar(squeeze_,hand);
+            value.trigger=scalar(trigger_,hand,trigger_blocked_[hand]);
+            value.squeeze=scalar(squeeze_,hand,squeeze_blocked_[hand]);
             bool primary_available=false,secondary_available=false;
             const bool raw_primary=button(primary_,hand,&primary_available);
             const bool raw_secondary=button(secondary_,hand,&secondary_available);
@@ -309,6 +313,7 @@ public:
     }
     void suspend() const {
         primary_blocked_.fill(true);secondary_blocked_.fill(true);click_blocked_.fill(true);
+        trigger_blocked_.fill(true);squeeze_blocked_.fill(true);
         menu_blocked_=true;
         for (auto& gesture:click_gestures_)
             if (gesture!=ClickGesture::none) gesture=ClickGesture::blocked;

@@ -66,6 +66,37 @@ This follows the complementary stereo proof of draw/eye-production counts,
 submitted eye pose/FOV/subimages and actual eye images. Distinct texture handles
 or a successful OpenXR call alone are not pixel evidence.
 
+### Comparative mod bug checks
+
+External reports are investigation leads, not proof of the same defect here.
+[UEVR #453](https://github.com/praydog/UEVR/issues/453) describes nested XInput
+forwarder hooks losing one-shot input; our native gamepad entry hook is not that
+multi-DLL hook layout. [UEVR #436](https://github.com/praydog/UEVR/pull/436)
+describes stale poses when game frame numbers freeze/restart; our XR session
+samples the current runtime-predicted display time rather than indexing a pose
+queue by the game's frame number. Do not copy Windows DLLs or change registry
+settings as speculative fixes.
+
+Controller reconnection reports such as
+[UEVR #200](https://github.com/praydog/UEVR/issues/200) prompted independent
+action-availability checks. `test_input_analog_recovery` covers both hands,
+trigger/grip actions, focus loss, explicit suspension, whole-hand inactivity
+and action-only inactivity while poses remain valid. A held or unseen press
+must remain suppressed until an **active** pressure sample falls to 40% or
+below; an inactive action's synthetic zero is not a physical release. The
+regression exercises the actual menu-press and native-use mapping consumers,
+independent actions/hands and malformed active values, not just self-counters.
+
+[Nomai VR #565](https://github.com/Raicuparta/nomai-vr/issues/565) reports
+reading-tool jitter, while [REFramework #1100](https://github.com/praydog/REFramework/issues/1100)
+reports a hand stuck during/after a scripted carry animation. These motivate
+the separate native camera/wrist ownership, scripted-state and hand-alignment
+checks; passing raw XR input tests does not establish those behaviors.
+[Nomai VR #570](https://github.com/Raicuparta/nomai-vr/issues/570) reports reversed
+page directions in left-handed mode. Keep gameplay handedness separate from
+menu pointer coordinates, and include both hands in the physical menu checklist.
+These reports do not establish new Outlast defects or physical acceptance.
+
 Primary-source testing guidance:
 
 - [Khronos OpenXR CTS](https://github.com/KhronosGroup/OpenXR-CTS):

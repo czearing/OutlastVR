@@ -24,7 +24,7 @@ add_test(NAME test_native_hidden_bones COMMAND test_outlast_body_lifecycle --hid
 set_tests_properties(test_native_hidden_bones PROPERTIES LABELS "cpu" TIMEOUT 120)
 add_test(NAME test_passive_hud_safe_area COMMAND test_headlocked_ui --hud-safe-area)
 set_tests_properties(test_passive_hud_safe_area PROPERTIES LABELS "cpu" TIMEOUT 120)
-foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery snap-recovery)
+foreach(mode IN ITEMS pause-chord fallback-gestures button-recovery snap-recovery analog-recovery)
     string(REPLACE "-" "_" test_mode "${mode}")
     add_test(NAME test_input_${test_mode} COMMAND test_openxr_motion_input --${mode})
     set_tests_properties(test_input_${test_mode} PROPERTIES LABELS "cpu" TIMEOUT 120)

@@ -17,6 +17,7 @@ RETAIL_SHA256 = "06c1c37c7f1d0bd0296328ff977ff847bee82f878fb4d79f4282a026aef68a9
 REQUIRED_TESTS = {
     "test_outlast_config", "test_outlast_camcorder", "test_outlast_native_use",
     "test_outlast_motion_controls", "test_native_camcorder_lifecycle",
+    "test_input_analog_recovery",
     "test_native_camera_resources", "test_native_image", "test_native_visibility",
     "test_openxr_session", "test_openxr_lifecycle", "test_converted_index_cache",
     "test_material_world_position_native", "test_material_full_samplers",
