@@ -246,8 +246,13 @@ IDirect3DStateBlock9& D3D9StereoPipeline::prepare_caller_state() {
         const D3DVIEWPORT9 viewport{0,0,1,1,0,1};
         record(device_->SetViewport(&viewport));
     }
-    if (shaders_.scissor_constant>=0)
+    if (shaders_.scissor_constant>=0) {
         record(device_->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE));
+        if (shaders_.viewport_constant>=0 && !shaders_.ui_plane) {
+            const RECT rectangle{0,0,1,1};
+            record(device_->SetScissorRect(&rectangle));
+        }
+    }
     Com<IDirect3DStateBlock9> selected;
     const auto ended=device_->EndStateBlock(selected.put());
     gpu_check(first,"Record precise stereo caller-state mask");
@@ -822,8 +827,16 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
             gpu_check(device_->SetPixelShaderConstantF(shaders_.scissor_delta_constant,bounds[1],1),
                       "Bind right-eye caller scissor difference");
         }
-        gpu_check(device_->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE),
-                  "Replace single-rectangle hardware scissor with per-eye pixel clipping");
+        bool hardware=false;
+        if (shaders_.viewport_constant>=0 && !shaders_.ui_plane) {
+            const auto rectangle=stereo_atlas_scissor(rectangles,atlas_viewport.Width/2,atlas_viewport.Height);
+            hardware=rectangle.left!=0 || rectangle.top!=0 ||
+                rectangle.right!=LONG(atlas_viewport.Width) || rectangle.bottom!=LONG(atlas_viewport.Height);
+            if (hardware)
+                gpu_check(device_->SetScissorRect(&rectangle),"Bound stereo rasterization to both eye scissors");
+        }
+        gpu_check(device_->SetRenderState(D3DRS_SCISSORTESTENABLE,hardware),
+                  "Keep exact per-eye clipping inside conservative hardware bounds");
     }
     if (shaders_.camera_base_constant>=0) {
         float center[4]{},delta[4]{};

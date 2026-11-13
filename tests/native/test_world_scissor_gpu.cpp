@@ -1,15 +1,39 @@
 #include "isolated_d3d9.h"
 #include "d3d9_shader_variants.h"
 #include "isolated_d3d12_counter.h"
+#include "native_hook_set.h"
 #include "stereo_reconstruction.h"
 #include <iostream>
 
 using namespace olvr;
 
+using DrawIndexedEntry=HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,INT,UINT,UINT,UINT,UINT);
+static DrawIndexedEntry original_draw=nullptr;
+static RECT observed_scissor{};
+static DWORD observed_enabled=0;
+static UINT observed_draws=0;
+static bool fault_hardware=false;
+
+static HRESULT WINAPI observe_scissor(IDirect3DDevice9* device,D3DPRIMITIVETYPE type,INT base,
+                                     UINT minimum,UINT vertices,UINT start,UINT primitives) {
+    ++observed_draws;
+    if (fault_hardware) {
+        const auto status=device->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);
+        if (FAILED(status)) return status;
+    }
+    const auto rectangle=device->GetScissorRect(&observed_scissor);
+    if (FAILED(rectangle)) return rectangle;
+    const auto enabled=device->GetRenderState(D3DRS_SCISSORTESTENABLE,&observed_enabled);
+    if (FAILED(enabled)) return enabled;
+    return original_draw(device,type,base,minimum,vertices,start,primitives);
+}
+
 int main(int argc,char** argv) {
     try {
         const bool fault=argc==2 && std::string(argv[1])=="--fault-scissor";
-        if (argc>2 || (argc==2 && !fault)) throw std::invalid_argument("Unknown world-scissor GPU control");
+        fault_hardware=argc==2 && std::string(argv[1])=="--fault-hardware-scissor";
+        if (argc>2 || (argc==2 && !fault && !fault_hardware))
+            throw std::invalid_argument("Unknown world-scissor GPU control");
         constexpr UINT width=128,height=96;
         IsolatedDevice isolated(width*2,height);
         auto& device=*isolated.device.get();
@@ -55,8 +79,14 @@ int main(int argc,char** argv) {
             {-.35f,-.25f,3},{.35f,.25f,3},{-.35f,.25f,3}};
         D3D9ShaderVariants variants(device);
         IsolatedD3D12DrawCounter counter(isolated.translation_device(),true,isolated.translation_queue());
-        UINT draws=0,pixels=0;
-        for (unsigned sample=0;sample<12;++sample) {
+        NativeHookSet draw_hook;
+        void** table=nullptr;
+        std::memcpy(&table,&device,sizeof(table));
+        draw_hook.add(reinterpret_cast<DrawIndexedEntry>(table[82]),&observe_scissor,original_draw);
+        draw_hook.enable_pending();
+        UINT draws=0,pixels=0,bounded_draws=0;
+        UINT64 raster_area=0,full_area=0;
+        for (unsigned sample=0;sample<13;++sample) {
             const float yaw=sample==0 || sample==7?-.5f:sample==1 || sample==6?.5f:sample==2?.25f:0;
             const float pitch=sample==8?.5f:sample==9?-.5f:0;
             const Quaternion orientation{std::sin(pitch*.5f)*std::cos(yaw*.5f),
@@ -85,7 +115,8 @@ int main(int argc,char** argv) {
             }
             std::vector<DWORD> reference;
             for (unsigned filtered=0;filtered<2;++filtered) {
-                const D3DVIEWPORT9 viewport{0,0,width*2,height,0,1};
+                const D3DVIEWPORT9 viewport=sample==12?
+                    D3DVIEWPORT9{16,8,width*2-32,height-16,0,1}:D3DVIEWPORT9{0,0,width*2,height,0,1};
                 gpu_check(device.SetViewport(&viewport),"Set world-scissor atlas viewport");
                 gpu_check(device.SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE),"Clear complete world-scissor atlas");
                 gpu_check(device.Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0),"Clear world-scissor test image");
@@ -94,6 +125,7 @@ int main(int argc,char** argv) {
                 auto& pipeline=variants.current(0,false,true,filtered!=0,true,!fault);
                 pipeline.set_reconstruction_context(context);
                 counter.reset();
+                observed_draws=0;
                 gpu_check(device.BeginScene(),"Begin world-scissor GPU case");
                 const auto result=pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,2,geometry,sizeof(geometry),sizeof(geometry[0]),views);
                 if (!result.succeeded()) throw std::runtime_error("World-scissor paired draw or caller restoration failed");
@@ -109,6 +141,23 @@ int main(int argc,char** argv) {
                 if (counter.indexed_calls!=1 || counter.plain_calls || counter.instances!=2 ||
                     executed.size()!=1 || !executed[0].indexed || executed[0].instances!=2)
                     throw std::runtime_error("World scissor introduced duplicated or non-instanced geometry");
+                const bool expected_hardware=filtered || sample==12;
+                if (observed_draws!=1 || observed_enabled!=DWORD(expected_hardware) ||
+                    (observed_enabled && (observed_scissor.left<0 ||
+                    observed_scissor.top<0 || observed_scissor.right>LONG(width*2) ||
+                    observed_scissor.bottom>LONG(height) || observed_scissor.left>observed_scissor.right ||
+                    observed_scissor.top>observed_scissor.bottom)))
+                    throw std::runtime_error("Conservative hardware stereo scissor was not bound at the native draw;"
+                        " sample="+std::to_string(sample)+" filtered="+std::to_string(filtered)+
+                        " observed_draws="+std::to_string(observed_draws)+" enabled="+std::to_string(observed_enabled)+
+                        " rect="+std::to_string(observed_scissor.left)+","+std::to_string(observed_scissor.top)+
+                        ","+std::to_string(observed_scissor.right)+","+std::to_string(observed_scissor.bottom));
+                if (filtered) {
+                    const auto area=UINT64(observed_scissor.right-observed_scissor.left)*
+                        UINT64(observed_scissor.bottom-observed_scissor.top);
+                    raster_area+=area;full_area+=UINT64(width)*2*height;
+                    if (area<UINT64(width)*2*height) ++bounded_draws;
+                }
                 RECT restored{};DWORD enabled=0;
                 gpu_check(device.GetScissorRect(&restored),"Check original world scissor restoration");
                 gpu_check(device.GetRenderState(D3DRS_SCISSORTESTENABLE,&enabled),"Check original world scissor enable");
@@ -127,10 +176,13 @@ int main(int argc,char** argv) {
                 ++draws;
             }
         }
+        if (bounded_draws<3 || raster_area>=full_area)
+            throw std::runtime_error("Hardware stereo scissor retained full-atlas rasterization");
         std::cout<<"PASS: world-light scissors match independently unscissored eye images; pixel_checks="<<pixels
             <<"; physical_draws="<<draws<<"; physical_instances="<<draws*2
             <<"; queue_executed_draws="<<draws<<"; tracked yaw/IPD/asymmetric FOV; distinct near-eye clips;"
-            <<" truncated bounds; empty clip; caller restored\n";
+            <<" truncated bounds; empty clip; caller restored; hardware_bounded_draws="<<bounded_draws
+            <<"; hardware_raster_area="<<raster_area<<"; full_atlas_area="<<full_area<<"\n";
         return 0;
     } catch (const std::exception& error) {std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

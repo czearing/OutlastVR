@@ -43,6 +43,11 @@ The hit-comfort fixture separately checks rotation/zoom removal, unchanged damag
 mask/tint, retained movie offsets and the opt-in shader policy using real GPU pixels.
 Native-light fixtures check the rendered head midpoint, root/yaw rebasing, one
 original light tick and deferral during scripts, stale poses and tracking/focus loss.
+They also overlap a native light tick with the next XR frame wait, retaining only
+the last still-fresh tracked pose. Camera-handoff fixtures resume with an animated
+bone pose, checking that it cannot replace the established neutral standing anchor.
+The canted-eye fixture independently checks native light direction while headset
+yaw/pitch changes and the body remains stationary.
 
 ## Headset playtest
 
@@ -58,6 +63,8 @@ original light tick and deferral during scripts, stale poses and tracking/focus 
   inventory event occurs once and movement returns afterward.
 - Check doors, vaults, ladders and hiding. After leaving a locker, verify that
   enemies still animate, detect the player and resume their behavior.
+  Sprint and vault repeatedly while turning the headset; check position during
+  the animation and after returning to walking, including crouch and recentering.
 - Move each hand through its range, near walls and during scripted animations.
   Check tracking recovery and that rendered shadows follow the tracked hands.
 - Compare night vision with the original game in the same scene. Check
@@ -145,6 +152,14 @@ Discard the explicitly marked cold sample when comparing warmed timings.
 These are synthetic mechanism benchmarks, not retail water or headset FPS.
 The normal runtime's `FRAME_PERFORMANCE` batches are diagnostic summaries;
 their averages/maxima are not a substitute for the complete headset trace.
+
+`test_world_scissor_gpu` also observes the hardware scissor at the native draw,
+checks reduced raster bounds and compares both eyes against unclipped reference
+images. The exact per-eye pixel clipping remains active inside that conservative
+hardware union; full-atlas draws and projected UI planes retain their existing
+clipping path.
+`--fault-hardware-scissor` must fail when hardware clipping is disabled.
+Reduced fixture coverage is not a measured retail water-area FPS improvement.
 
 ## Release record
 

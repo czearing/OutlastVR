@@ -32,6 +32,7 @@ REQUIRED_TESTS = {
     "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
     "test_integrated_material_constants",
     "test_native_uniform_read_batching",
+    "test_world_scissor", "test_world_scissor_gpu",
     "test_transparent_overdraw_stereo", "test_transparent_hit_overdraw",
     "test_outlast_hit_distortion", "test_hit_distortion_gpu", "test_outlast_hit_distortion_packed",
     "python_regressions",
@@ -197,6 +198,7 @@ def main(argv=None):
             "body_lifecycle": binaries / "test_outlast_body_lifecycle.exe",
             "atlas": binaries / "test_atlas_pixel_routing.exe",
             "hit_comfort": binaries / "test_outlast_hit_distortion.exe",
+            "world_scissor": binaries / "test_world_scissor_gpu.exe",
         }
         inputs = {name: dict(path=str(path), sha256=sha256(path)) for name, path in paths.items()}
         report["inputs"] = inputs
@@ -244,11 +246,16 @@ def main(argv=None):
                     markers += [
                         "PASS: headset_night_light_midpoint; live_root_yaw_rebased; original_tick_once; "
                         "scripted_modes_and_stale_pose_preserved; focus_tracking_loss_deferred",
+                        "PASS: headset_light_during_xr_wait; previous_tracked_pose_retained; native_tick_once",
                     ]
                 if mode == "--camera-handoff":
                     markers += [
                         "completed_camera_pose_matches=12; native_camera_handoffs=2; unlinked_views=4; "
                         "native_origins_preserved; gameplay_stabilization_resumed",
+                    ]
+                if mode == "--ui-in-renderer":
+                    markers += [
+                        "PASS: headset_light_yaw_pitch; stationary_body; canted_eye_midpoint; independent_direction_oracle",
                     ]
                 if mode == "--material-constants":
                     markers += [
@@ -293,6 +300,9 @@ def main(argv=None):
         run("reject-hit-comfort", [paths["hit_comfort"], "--fault-hit-distortion"],
             ["Comfort policy retained hit UV distortion or removed scripted movie offsets"],
             expected_code=1)
+        run("reject-hardware-scissor", [paths["world_scissor"], "--fault-hardware-scissor"],
+            ["FAIL: Conservative hardware stereo scissor was not bound at the native draw"],
+            expected_code=1)
         for name, original in inputs.items():
             if sha256(paths[name]) != original["sha256"]:
                 raise ValueError(f"Input changed during acceptance: {name}")
@@ -301,7 +311,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+10} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+11} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

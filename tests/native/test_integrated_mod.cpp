@@ -49,7 +49,7 @@ void* native_engine_pointer=native_engine.data();
 std::array<UINT,3> native_night_lights{0,0,1};
 std::array<std::array<unsigned char,0x280>,3> native_light_components{};
 std::array<unsigned char,0xa80> recreated_engine{};
-unsigned light_ticks=0,light_pose_calls=0;
+unsigned light_ticks=0,light_pose_calls=0,light_wait_checks=0,last_head_light_frame=0,light_rotation_checks=0;
 std::array<UINT,4> native_effect_calls{};
 DWORD native_effect_thread=0;
 using MoviePlaying=INT(WINAPI*)(void*,const wchar_t*);
@@ -642,6 +642,16 @@ int main(int argc,char** argv) {
         focus=std::make_unique<JoystickFocusFixture>();
         {D3D9On12Factory inventory;mock.luid=inventory.device()->GetAdapterLuid();}
         mock.geometry=true;mock.recentered=true;
+        if (mode.empty()) mock.frame_waiting=[] {
+            if (!mock.frame || last_head_light_frame!=mock.frame || native_effects[0x3b8]!=2 ||
+                GetTickCount64()-mock.frame_started_ms>=200) return;
+            const auto poses=light_pose_calls,ticks=light_ticks;
+            light_tick_stub(camera_hero.data(),.015f);
+            require(light_ticks==ticks+1 && light_pose_calls==poses+1,
+                "Headset light lost the last tracked pose while the next XR frame was waiting; frame="+
+                std::to_string(mock.frame));
+            ++light_wait_checks;
+        };
         mock.floor_startup_test=mode=="--floor-startup";
         mock.stage_supported=mock.floor_startup_test;
         dll=LoadLibraryW(std::filesystem::path(argv[1]).c_str());
@@ -863,7 +873,7 @@ int main(int argc,char** argv) {
             }
             if (camera_bob) {
                 auto animated=frame;
-                animated.origin=f && (!camera_handoff || f%10!=4)?
+                animated.origin=f?
                     Vec3{10*std::sin(float(f)),12*std::sin(float(f)*.7f),
                                        6*std::sin(float(f)*.8f)}:Vec3{};
                 camera_base_pose[0]=animated.origin.x;
@@ -1113,6 +1123,19 @@ int main(int argc,char** argv) {
             const auto poses_before=light_pose_calls,ticks_before=light_ticks;
             light_tick_stub(camera_hero.data(),.015f);
             require(light_ticks==ticks_before+1,"Headset light replayed native battery/light animation");
+            if (ui_owned && light_pose_calls!=poses_before) {
+                const auto forward=oracle_rotate(mock.ui_head,{0,0,-1});
+                const auto expected=oracle_rotate({0,std::sin(-.2f),0,std::cos(-.2f)},forward);
+                std::array<INT,3> rotation{};
+                std::memcpy(rotation.data(),native_light_components[0].data()+0x26c,sizeof(rotation));
+                const double pitch=rotation[0]*(6.2831853071795864769/65536);
+                const double yaw=rotation[1]*(6.2831853071795864769/65536);
+                require(std::abs(std::cos(pitch)*std::cos(yaw)-expected.x)<.0002 &&
+                    std::abs(std::cos(pitch)*std::sin(yaw)-expected.y)<.0002 &&
+                    std::abs(std::sin(pitch)+expected.z)<.0002 && rotation[2]==0,
+                    "Native night light did not follow independent headset yaw/pitch with a stationary body");
+                ++light_rotation_checks;
+            }
             if (light_pose_calls!=poses_before && mode.empty() && !head_light_checked) {
                 Vec3 local{};
                 std::memcpy(&local,native_light_components[0].data()+0x210,sizeof(local));
@@ -1149,6 +1172,7 @@ int main(int argc,char** argv) {
             const bool active=(f+1)%5!=0 && (input_chords || (f+1)%3!=0);
             if (!active)
                 require(light_pose_calls==poses_before,"Headset light continued after focus or frame tracking loss");
+            if (mode.empty() && light_pose_calls!=poses_before) last_head_light_frame=mock.frame;
             require(bool(observed_joystick_focus)==active,
                 "XR-focused joystick polling remained tied to desktop keyboard focus");
             require(joystick_focus_site(focus_viewport.data())==0,
@@ -1287,6 +1311,14 @@ int main(int argc,char** argv) {
             if (event) require(CloseHandle(event)!=0,"Cannot release an overlap barrier");
         if (mode.empty() || mode=="--fault-headset-light")
             require(head_light_checked,"Production headset light correction was never exercised");
+        if (mode.empty()) {
+            require(light_wait_checks>0,"Native light/XR-wait overlap was never exercised");
+            std::cout<<"PASS: headset_light_during_xr_wait; previous_tracked_pose_retained; native_tick_once\n";
+        }
+        if (ui_owned) {
+            require(light_rotation_checks>=3,"Headset light rotation coverage was truncated");
+            std::cout<<"PASS: headset_light_yaw_pitch; stationary_body; canted_eye_midpoint; independent_direction_oracle\n";
+        }
         if (head_light_checked)
             std::cout<<"PASS: headset_night_light_midpoint; live_root_yaw_rebased; original_tick_once; "
                 <<"scripted_modes_and_stale_pose_preserved; focus_tracking_loss_deferred\n";

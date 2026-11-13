@@ -92,7 +92,29 @@ int main(int argc,char**) {
             ++source.serial;source.basic=0;source.special=0;source.mode=0;
             const auto resumed=add(source.bone,{2,-3,4});
             scripted.complete(source,resumed);
-            equal(scripted.locate(resumed)->origin,resumed);
+            equal(scripted.locate(resumed)->origin,add(source.root,{-18,-5,172}));
+        }
+        {
+            OutlastLocomotionCamera returning;
+            auto source=sample;source.root={0,0,10};source.bone={-20,-2,178};
+            returning.complete(source,source.bone);
+            for (const unsigned special:{5u,8u,26u,29u,31u}) {
+                ++source.serial;source.basic=2;source.special=special;
+                source.mode=std::numeric_limits<unsigned>::max();source.flags=0;
+                source.root=add(source.root,{70,-20,35});
+                source.bone=add(source.root,{25,-30,90});
+                returning.complete(source,source.bone);
+                ++source.serial;source.basic=1;source.special=0;source.mode=0;source.flags=2;
+                source.yaw+=16384;
+                source.bone=add(source.root,{30,40,130});
+                const auto post=Vec3{2,-3,4};
+                returning.complete(source,add(source.bone,post));
+                const auto view=returning.locate(add(source.bone,post));
+                const double angle=double(source.yaw)*6.2831853071795864769/65536;
+                equal(view->origin,add(add(source.root,
+                    {float(-20*std::cos(angle)+2*std::sin(angle)),
+                     float(-20*std::sin(angle)-2*std::cos(angle)),168}),post));
+            }
         }
         {
             OutlastLocomotionCamera jumping;

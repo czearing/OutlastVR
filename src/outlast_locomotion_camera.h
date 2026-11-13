@@ -44,6 +44,7 @@ class OutlastLocomotionCamera {
     std::uintptr_t camera_=0,hero_=0;
     bool anchored_=false,crouched_=false;
     Vec3 local_anchor_{};
+    std::optional<Vec3> standing_anchor_;
     std::optional<OutlastLocomotionSample> initial_standing_;
 
     static Vec3 yaw_rotate(Vec3 value,std::int32_t yaw,bool inverse) {
@@ -58,6 +59,11 @@ public:
             !finite(sample.bone) || !finite(final_origin) || !std::isfinite(sample.lean_intent) ||
             !std::isfinite(sample.lean_weight))
             throw std::invalid_argument("Invalid completed native locomotion camera");
+        if (sample.camera!=camera_ || sample.hero!=hero_) {
+            anchored_=false;
+            standing_anchor_.reset();
+            camera_=sample.camera;hero_=sample.hero;
+        }
         // The animation node's release tail is still intentional leaning.
         const bool airborne=outlast_airborne_locomotion(sample.basic,sample.special);
         const bool normal=(sample.basic==0 || sample.basic==1) && sample.special==0 && sample.mode==0 &&
@@ -74,9 +80,11 @@ public:
                 const auto& reference=initial_standing_ && !sample.crouched &&
                     initial_standing_->camera==sample.camera && initial_standing_->hero==sample.hero?
                     *initial_standing_:sample;
-                local_anchor_=yaw_rotate(add(reference.bone,scale(reference.root,-1)),reference.yaw,true);
+                local_anchor_=!sample.crouched && standing_anchor_?*standing_anchor_:
+                    yaw_rotate(add(reference.bone,scale(reference.root,-1)),reference.yaw,true);
                 camera_=sample.camera;hero_=sample.hero;crouched_=sample.crouched;anchored_=true;
             }
+            if (normal && !sample.crouched && !standing_anchor_) standing_anchor_=local_anchor_;
             initial_standing_.reset();
             const auto neutral=add(sample.root,yaw_rotate(local_anchor_,sample.yaw,false));
             correction=add(neutral,scale(sample.bone,-1));

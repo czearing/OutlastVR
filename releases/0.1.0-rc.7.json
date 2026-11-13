@@ -1,0 +1,14 @@
+{
+  "version": "0.1.0-rc.7",
+  "changes": [
+    "Improved performance in water-heavy areas without reducing graphics quality.",
+    "Improved VR frame pacing by removing the native frame-rate ceiling.",
+    "Fixed night-vision lighting losing alignment with the headset.",
+    "Fixed camera-position drift after sprinting and vaulting obstacles.",
+    "Removed hit-induced view rotation and zoom by default; the original distortion can be restored in settings."
+  ],
+  "known_issues": [
+    "Some scripted grabs and other screen effects can still feel off in VR.",
+    "Physical camcorder controls remain experimental and are off by default."
+  ]
+}

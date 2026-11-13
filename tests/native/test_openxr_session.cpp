@@ -56,6 +56,8 @@ struct Mock {
     float ipd() const {return !dynamic_ipd || frame<7?.064f:frame<12?.078f:frame<17?.050f:.072f;}
     bool reference_test=false,stage_supported=false,origins_queued=false;
     bool floor_startup_test=false;
+    void (*frame_waiting)()=nullptr;
+    ULONGLONG frame_started_ms=0;
     std::vector<XrEventDataReferenceSpaceChangePending> origin_events;
     bool gated_release_test=false,fault_serial_wait=false;
     UINT gated_releases=0;
@@ -423,6 +425,8 @@ XrResult XRAPI_CALL images(XrSwapchain, uint32_t capacity, uint32_t* count, XrSw
 }
 XrResult XRAPI_CALL wait_frame(XrSession, const XrFrameWaitInfo*, XrFrameState* output) {
     mock.expect(mock.running && !mock.begun && !mock.acquired);
+    if (mock.frame_waiting) mock.frame_waiting();
+    mock.frame_started_ms=GetTickCount64();
     ++mock.frame;
     output->predictedDisplayTime = mock.frame * 11111111LL;
     output->predictedDisplayPeriod = 11111111LL;

@@ -68,6 +68,34 @@ struct StereoReconstructionContext {
     TrackingFrame original_camera;
 };
 
+inline RECT stereo_atlas_scissor(const std::array<RECT,2>& eyes,unsigned eye_width,unsigned height) {
+    if (!eye_width || eye_width>unsigned(std::numeric_limits<LONG>::max())/2 ||
+        !height || height>unsigned(std::numeric_limits<LONG>::max()))
+        throw std::invalid_argument("Invalid hardware stereo scissor extent");
+    const LONG width=static_cast<LONG>(eye_width),bottom=static_cast<LONG>(height);
+    RECT result{};
+    bool visible=false;
+    for (unsigned eye=0;eye<2;++eye) {
+        const auto& source=eyes[eye];
+        if (source.left>source.right || source.top>source.bottom)
+            throw std::invalid_argument("Invalid hardware stereo scissor bounds");
+        RECT clipped{std::clamp(source.left,0L,width),std::clamp(source.top,0L,bottom),
+            std::clamp(source.right,0L,width),std::clamp(source.bottom,0L,bottom)};
+        if (clipped.left==clipped.right || clipped.top==clipped.bottom) continue;
+        clipped.left+=static_cast<LONG>(eye)*width;
+        clipped.right+=static_cast<LONG>(eye)*width;
+        if (!visible) result=clipped;
+        else {
+            result.left=std::min(result.left,clipped.left);
+            result.top=std::min(result.top,clipped.top);
+            result.right=std::max(result.right,clipped.right);
+            result.bottom=std::max(result.bottom,clipped.bottom);
+        }
+        visible=true;
+    }
+    return result;
+}
+
 inline bool screen_reconstruction_translated(const StereoReconstructionContext& context,
                                              const Matrix4& matrix) {
     const auto origin=context.original_camera.origin;

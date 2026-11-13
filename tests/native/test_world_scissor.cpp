@@ -11,6 +11,43 @@ int main(int argc,char** argv) {
         const TrackingFrame frame{{10,-20,30},{1,0,0},{0,1,0},{0,0,-1},1,{-10,20,-30}};
         const EyeFov mono{-.35f,.4f,.4f,-.35f};
         std::size_t checks=0;
+        const std::array<std::array<RECT,2>,7> clips{{
+            {{{2,1,6,5},{2,1,6,5}}},
+            {{{0,0,0,0},{1,2,4,6}}},
+            {{{2,1,6,5},{0,3,3,8}}},
+            {{{-10,-10,20,20},{-10,-10,20,20}}},
+            {{{-5,1,-1,7},{9,0,12,8}}},
+            {{{0,0,0,0},{0,0,0,0}}},
+            {{{1,2,4,6},{0,0,0,0}}}
+        }};
+        for (const auto& clip:clips) {
+            const auto actual=stereo_atlas_scissor(clip,8,8);
+            RECT expected{};
+            bool visible=false;
+            for (LONG y=0;y<8;++y) for (LONG x=0;x<16;++x) {
+                const auto& eye=clip[x/8];
+                const auto local=x%8;
+                if (local<eye.left || local>=eye.right || y<eye.top || y>=eye.bottom) continue;
+                if (!visible) expected={x,y,x+1,y+1};
+                else {
+                    expected.left=std::min(expected.left,x);expected.top=std::min(expected.top,y);
+                    expected.right=std::max(expected.right,x+1);expected.bottom=std::max(expected.bottom,y+1);
+                }
+                visible=true;++checks;
+            }
+            if (std::memcmp(&actual,&expected,sizeof(actual)))
+                throw std::runtime_error("Hardware atlas scissor differs from independent per-eye pixel coverage");
+        }
+        const auto rejects_hardware=[](auto operation) {
+            bool rejected=false;
+            try {operation();} catch (const std::invalid_argument&) {rejected=true;}
+            if (!rejected) throw std::runtime_error("Invalid hardware atlas scissor was accepted");
+        };
+        rejects_hardware([&] {stereo_atlas_scissor(clips[0],0,8);});
+        rejects_hardware([&] {stereo_atlas_scissor(clips[0],8,0);});
+        rejects_hardware([&] {stereo_atlas_scissor(clips[0],unsigned(std::numeric_limits<LONG>::max()),8);});
+        rejects_hardware([&] {stereo_atlas_scissor(clips[0],8,std::numeric_limits<unsigned>::max());});
+        rejects_hardware([&] {stereo_atlas_scissor({RECT{4,1,2,5},RECT{}},8,8);});
         for (const float native_depth:{.999f,1.f,1.02f}) for (const float near_plane:{.125f,2.f})
             for (const float yaw:{-.7f,-.35f,0.f,.4f,.7f}) {
                 StereoReconstructionContext context{};
@@ -110,7 +147,8 @@ int main(int argc,char** argv) {
         if (!refused) throw std::runtime_error("Invalid world scissor accepted");
         std::cout<<"PASS: conservative world light scissors; physical_eye_points="<<checks
             <<"; asymmetric eyes; yaw; IPD; offset viewport; native depth conventions; near/infinite endpoints;"
-            <<" bounded interior retained; truncated bounds and eye-plane crossings conservative; empty clip preserved\n";
+            <<" bounded interior retained; truncated bounds and eye-plane crossings conservative; empty clip preserved;"
+            <<" hardware atlas union matches independent pixel coverage\n";
         return 0;
     } catch (const std::exception& error) {std::cerr<<"FAIL: "<<error.what()<<'\n';return 1;}
 }

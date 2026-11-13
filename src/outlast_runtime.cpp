@@ -650,10 +650,6 @@ class Runtime {
         if (frame_open_) return true;
         if (frame_attempted_) return false;
         frame_attempted_=true;
-        {
-            std::lock_guard<std::mutex> lock(skeleton_mutex_);
-            head_frame_.reset();
-        }
         Internal internal;
         LARGE_INTEGER wait_start{};
         QueryPerformanceCounter(&wait_start);
