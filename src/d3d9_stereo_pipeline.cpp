@@ -68,6 +68,46 @@ D3D9StereoPipeline::D3D9StereoPipeline(IDirect3DDevice9& device, const StereoSha
     gpu_check(factory->CheckDeviceFormat(creation.AdapterOrdinal, creation.DeviceType, display.Format,
                                         D3DUSAGE_QUERY_VERTEXTEXTURE, D3DRTYPE_TEXTURE,
                                         D3DFMT_A32B32G32R32F), "Check float32 stereo vertex texture");
+    std::vector<std::size_t> order;
+    for (std::size_t index=0;index<shaders_.tracked_uniforms.size();++index) {
+        const auto& uniform=shaders_.tracked_uniforms[index];
+        const auto limit=uniform.vertex?caps_.MaxVertexShaderConst:224u;
+        if (!uniform.rows || uniform.rows>4 || uniform.original_register>=limit ||
+            uniform.rows>limit-uniform.original_register || uniform.texture_row<8 ||
+            uniform.texture_row>=shaders_.view_texture_width ||
+            uniform.rows>shaders_.view_texture_width-uniform.texture_row ||
+            (uniform.material_world_position &&
+             (uniform.vertex || uniform.kind!=sm3::TrackedUniformKind::material_camera)))
+            throw std::invalid_argument("Tracked shader requires bounded native reconstruction records");
+        order.push_back(index);
+    }
+    std::sort(order.begin(),order.end(),[&](std::size_t a,std::size_t b) {
+        const auto& left=shaders_.tracked_uniforms[a];
+        const auto& right=shaders_.tracked_uniforms[b];
+        if (left.vertex!=right.vertex) return left.vertex>right.vertex;
+        return left.original_register<right.original_register;
+    });
+    for (const auto index:order) {
+        const auto& uniform=shaders_.tracked_uniforms[index];
+        if (uniform_reads_.empty() || uniform_reads_.back().vertex!=uniform.vertex ||
+            uniform.original_register>uniform_reads_.back().first+uniform_reads_.back().rows)
+            uniform_reads_.push_back({uniform.vertex,uniform.original_register,uniform.rows});
+        else {
+            auto& read=uniform_reads_.back();
+            read.rows=std::max(read.rows,uniform.original_register+uniform.rows-read.first);
+        }
+    }
+    std::size_t values=0;
+    for (auto& read:uniform_reads_) {read.offset=values;values+=read.rows*4;}
+    original_uniforms_.resize(values);
+    for (const auto& uniform:shaders_.tracked_uniforms) {
+        const auto read=std::find_if(uniform_reads_.begin(),uniform_reads_.end(),[&](const UniformRead& span) {
+            return span.vertex==uniform.vertex && span.first<=uniform.original_register &&
+                span.first+span.rows>=uniform.original_register+uniform.rows;
+        });
+        if (read==uniform_reads_.end()) throw std::logic_error("Native uniform is outside its read span");
+        uniform_value_offsets_.push_back(read->offset+(uniform.original_register-read->first)*4);
+    }
 }
 
 D3D9StereoPipeline::~D3D9StereoPipeline()=default;
@@ -501,25 +541,19 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
         }
         uniform_evidence_written_=true;
     }
-    original_uniforms_.resize(shaders_.tracked_uniforms.size());
-    for (std::size_t index=0;index<shaders_.tracked_uniforms.size();++index) {
-        const auto& uniform=shaders_.tracked_uniforms[index];
-        if (!reconstruction_ || !uniform.rows || uniform.rows>4 ||
-            uniform.texture_row<8 || uniform.texture_row+uniform.rows>shaders_.view_texture_width ||
-            (uniform.material_world_position &&
-             (uniform.vertex || uniform.kind!=sm3::TrackedUniformKind::material_camera)))
-            throw std::invalid_argument("Tracked shader requires bounded native reconstruction records");
-        auto& original=original_uniforms_[index];
-        original.fill(0);
-        gpu_check(uniform.vertex?
-            device_->GetVertexShaderConstantF(uniform.original_register,original.data(),uniform.rows):
-            device_->GetPixelShaderConstantF(uniform.original_register,original.data(),uniform.rows),
-            "Read original native reconstruction uniform");
-        for (unsigned component=0;component<uniform.rows*4;++component)
-            if (!std::isfinite(original[component]))
-                throw std::invalid_argument("Native reconstruction uniform contains nonfinite values");
+    if (!uniform_reads_.empty() && !reconstruction_)
+        throw std::invalid_argument("Tracked shader requires bounded native reconstruction records");
+    for (const auto& read:uniform_reads_) {
+        auto* values=original_uniforms_.data()+read.offset;
+        gpu_check(read.vertex?
+            device_->GetVertexShaderConstantF(read.first,values,read.rows):
+            device_->GetPixelShaderConstantF(read.first,values,read.rows),
+            "Read contiguous original native reconstruction uniforms");
     }
     if (!view_records_valid_ || cached_views_!=views || cached_original_uniforms_!=original_uniforms_) {
+        for (const auto value:original_uniforms_)
+            if (!std::isfinite(value))
+                throw std::invalid_argument("Native reconstruction uniform contains nonfinite values");
         records.resize(shaders_.view_texture_width*4*2);
         std::fill(records.begin(),records.end(),0);
         for (UINT eye=0;eye<2;++eye) {
@@ -532,7 +566,7 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
                     !uniform.rows || uniform.rows>4)
                     throw std::invalid_argument("Tracked shader requires a valid native camera and bounded uniform records");
                 float original[16]{};
-                std::copy_n(original_uniforms_[uniform_index].begin(),uniform.rows*4,original);
+                std::copy_n(original_uniforms_.data()+uniform_value_offsets_[uniform_index],uniform.rows*4,original);
                 if (uniform.kind==sm3::TrackedUniformKind::material_camera) {
                     if (!uniform.material_world_position)
                         for (unsigned axis=0;axis<3;++axis)
@@ -587,7 +621,8 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
                                 });
                             if (camera==shaders_.tracked_uniforms.end())
                                 throw std::invalid_argument("Material projection lacks its native world offset");
-                            const auto& offset=original_uniforms_[std::size_t(camera-shaders_.tracked_uniforms.begin())];
+                            const auto* offset=original_uniforms_.data()+
+                                uniform_value_offsets_[std::size_t(camera-shaders_.tracked_uniforms.begin())];
                             for (unsigned row=0;row<4;++row) {
                                 // Fold the camera rebase into projection, not unrelated material reads.
                                 double translated=value[row*4+3];

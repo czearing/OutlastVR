@@ -73,11 +73,13 @@ if(OLVR_GPU_TESTS)
     add_test(NAME test_pixel_uniform_constants COMMAND test_tracked_uniforms --pixel-constants)
     add_test(NAME test_pixel_uniform_register_pressure COMMAND test_tracked_uniforms --pixel-register-pressure)
     add_test(NAME test_hit_effect_stereo COMMAND test_atlas_pixel_routing --hit-effects)
+    add_test(NAME test_native_uniform_read_batching COMMAND test_tracked_uniforms --uniform-reads)
     set_tests_properties(test_material_camera_precision test_material_world_position
         test_material_world_position_native test_material_world_position_precision
         test_material_alternate_varying test_material_full_samplers
         test_material_camera_projection test_converted_index_cache
         test_pixel_uniform_constants test_pixel_uniform_register_pressure test_hit_effect_stereo
+        test_native_uniform_read_batching
         PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     olvr_test(test_openxr_session)
     target_compile_definitions(test_openxr_session PRIVATE OLVR_ISOLATED_9ON12)

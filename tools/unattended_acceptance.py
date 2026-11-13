@@ -31,6 +31,7 @@ REQUIRED_TESTS = {
     "test_integrated_loading_blackout", "test_integrated_loading_upload_blackout",
     "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
     "test_integrated_material_constants",
+    "test_native_uniform_read_batching",
     "python_regressions",
 }
 DLL_MODES = (
@@ -270,6 +271,11 @@ def main(argv=None):
             expected_code=1)
         run("reject-hit-effect", [paths["atlas"], "--fault-hit-effects"],
             ["FAIL: Hit-effect stereo UV, tint or recovery content mismatch"], expected_code=1)
+        run("reject-stale-uniform-read", [paths["uniforms"], "--fault-uniform-reads"],
+            ["FAIL: Tracked inverse matrices, fog camera or view rotation content mismatch; frame=3"],
+            expected_code=1)
+        run("reject-nonfinite-uniform-read", [paths["uniforms"], "--fault-uniform-nonfinite"],
+            ["FAIL: Native reconstruction uniform contains nonfinite values"], expected_code=1)
         for name, original in inputs.items():
             if sha256(paths[name]) != original["sha256"]:
                 raise ValueError(f"Input changed during acceptance: {name}")
@@ -278,7 +284,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+5} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+7} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

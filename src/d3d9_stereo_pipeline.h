@@ -96,8 +96,15 @@ private:
     std::vector<float> view_records_;
     std::vector<float> uploaded_view_records_;
     std::vector<float> pixel_constant_upload_;
-    std::vector<std::array<float,16>> original_uniforms_;
-    std::vector<std::array<float,16>> cached_original_uniforms_;
+    struct UniformRead {
+        bool vertex;
+        UINT first,rows;
+        std::size_t offset=0;
+    };
+    std::vector<UniformRead> uniform_reads_;
+    std::vector<std::size_t> uniform_value_offsets_;
+    std::vector<float> original_uniforms_;
+    std::vector<float> cached_original_uniforms_;
     StereoViewConstants cached_views_{};
     std::array<bool,16> occupied_streams_{};
     std::vector<Stream> streams_;

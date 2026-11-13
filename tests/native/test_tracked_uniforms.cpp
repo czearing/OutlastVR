@@ -7,6 +7,7 @@
 #endif
 #include <chrono>
 #include <iostream>
+#include <limits>
 
 using namespace olvr;
 
@@ -38,6 +39,49 @@ public:
         active_=nullptr;
     }
 };
+
+class UniformReadCounter {
+    using Get=HRESULT (WINAPI*)(IDirect3DDevice9*,UINT,float*,UINT);
+    IsolatedVtableEntry vertex_entry_,pixel_entry_;
+    Get vertex_=nullptr,pixel_=nullptr;
+    static inline UniformReadCounter* active_=nullptr;
+    static HRESULT WINAPI vertex(IDirect3DDevice9* device,UINT first,float* values,UINT count) {
+        active_->reads.push_back({0,first,count});
+        return active_->vertex_(device,first,values,count);
+    }
+    static HRESULT WINAPI pixel(IDirect3DDevice9* device,UINT first,float* values,UINT count) {
+        active_->reads.push_back({1,first,count});
+        const auto result=active_->pixel_(device,first,values,count);
+        if (SUCCEEDED(result) && (active_->stale_fog || active_->nonfinite_fog) && first<=12 && first+count>12)
+            values[(12-first)*4+3]=active_->nonfinite_fog?std::numeric_limits<float>::quiet_NaN():64;
+        return result;
+    }
+public:
+    std::vector<std::array<UINT,3>> reads;
+    bool stale_fog=false,nonfinite_fog=false;
+    explicit UniformReadCounter(IDirect3DDevice9& device) {
+        if (active_) throw std::logic_error("Overlapping isolated uniform read counters");
+        reads.reserve(32);
+        void** table=nullptr;
+        std::memcpy(&table,&device,sizeof(table));
+        vertex_=reinterpret_cast<Get>(table[95]);
+        pixel_=reinterpret_cast<Get>(table[110]);
+        vertex_entry_.install(&table[95],reinterpret_cast<void*>(&vertex));
+        pixel_entry_.install(&table[110],reinterpret_cast<void*>(&pixel));
+        active_=this;
+        try {
+            float probe[4]{};
+            gpu_check(device.GetVertexShaderConstantF(0,probe,1),"Verify isolated uniform read counter");
+            if (reads.size()!=1) throw std::runtime_error("Isolated uniform counter did not observe a direct query");
+            reads.clear();
+        } catch (...) {
+            pixel_entry_.detach();vertex_entry_.detach();active_=nullptr;throw;
+        }
+    }
+    ~UniformReadCounter() {
+        pixel_entry_.detach();vertex_entry_.detach();active_=nullptr;
+    }
+};
 #endif
 
 int main(int argc,char** argv) {
@@ -45,7 +89,11 @@ int main(int argc,char** argv) {
         const bool overwrite=argc==2 && std::string(argv[1])=="--burst-fault-overwrite";
         const bool shadow_fault=argc==2 && std::string(argv[1])=="--fault-shadow-projection";
         const bool shadow=shadow_fault || (argc==2 && std::string(argv[1])=="--shadow-projection");
-        const bool upload_cache=argc==2 && std::string(argv[1])=="--upload-cache";
+        const bool uniform_read_fault=argc==2 && std::string(argv[1])=="--fault-uniform-reads";
+        const bool uniform_nonfinite_fault=argc==2 && std::string(argv[1])=="--fault-uniform-nonfinite";
+        const bool uniform_reads=uniform_read_fault || uniform_nonfinite_fault ||
+            (argc==2 && std::string(argv[1])=="--uniform-reads");
+        const bool upload_cache=uniform_reads || (argc==2 && std::string(argv[1])=="--upload-cache");
         const bool cache_invalidation=argc==2 && std::string(argv[1])=="--cache-invalidation";
         const bool declaration_cache=argc==2 && std::string(argv[1])=="--declaration-cache";
         const bool gpu_benchmark=argc==2 && std::string(argv[1])=="--gpu-benchmark";
@@ -425,6 +473,22 @@ int main(int argc,char** argv) {
         counter.reset();
         std::unique_ptr<IndexUploadCounter> index_uploads;
         if (index_cache || benchmark) index_uploads=std::make_unique<IndexUploadCounter>(device);
+        std::unique_ptr<UniformReadCounter> uniform_counter;
+        std::vector<std::array<UINT,3>> expected_reads;
+        if (uniform_reads) {
+            std::array<std::array<bool,256>,2> used{};
+            for (const auto& uniform:pipeline.diagnostic_binding().tracked_uniforms)
+                for (unsigned row=0;row<uniform.rows;++row)
+                    used[uniform.vertex?0:1][uniform.original_register+row]=true;
+            for (unsigned stage=0;stage<2;++stage) for (unsigned first=0;first<used[stage].size();) {
+                if (!used[stage][first]) {++first;continue;}
+                unsigned end=first+1;
+                while (end<used[stage].size() && used[stage][end]) ++end;
+                expected_reads.push_back({stage,first,end-first});first=end;
+            }
+        }
+#else
+        if (uniform_reads) throw std::runtime_error("Uniform read control requires isolated native call counters");
 #endif
         UINT pixels=0;
         if (burst) {
@@ -521,7 +585,7 @@ int main(int argc,char** argv) {
                 gpu_check(device.SetScissorRect(&scissor),"Change caller scissor");
                 caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
             }
-            if (pixel_constants || register_pressure) {
+            if (pixel_constants || register_pressure || uniform_reads) {
                 if (serial==4) pipeline.release_device_resources();
                 caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
             }
@@ -541,6 +605,17 @@ int main(int argc,char** argv) {
                 gpu_check(gpu_start->Issue(D3DISSUE_END),"Start benchmark GPU workload");
             }
             const auto begin=std::chrono::steady_clock::now();
+#ifdef OLVR_ISOLATED_9ON12
+            if (uniform_reads) {
+                // Build the caller-state mask before attaching getter counters.
+                const auto warmup=pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,2,quad,sizeof(quad),sizeof(quad[0]),views);
+                if (!warmup.succeeded()) throw std::runtime_error("Uniform read counter warmup failed");
+                gpu_check(device.Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0),"Remove warmup pixels before the measured draw");
+                uniform_counter=std::make_unique<UniformReadCounter>(device);
+                uniform_counter->stale_fog=uniform_read_fault && serial==3;
+                uniform_counter->nonfinite_fog=uniform_nonfinite_fault && serial==3;
+            }
+#endif
             for (unsigned repeat=0;repeat<(benchmark?benchmark_draws:1u);++repeat) {
                 SubmissionResult submission{};
                 if (index_cache) {
@@ -568,7 +643,18 @@ int main(int argc,char** argv) {
             }
             submission_us[serial]=std::chrono::duration<double,std::micro>(
                 std::chrono::steady_clock::now()-begin).count()/(benchmark?benchmark_draws:1u);
-            if (caller_state || full_samplers || pixel_constants || register_pressure) {
+#ifdef OLVR_ISOLATED_9ON12
+            if (uniform_counter) {
+                uniform_counter->stale_fog=false;
+                auto actual=uniform_counter->reads;
+                std::sort(actual.begin(),actual.end());
+                if (actual!=expected_reads)
+                    throw std::runtime_error("Native tracked uniform reads were not coalesced into exact contiguous spans; actual="+
+                        std::to_string(actual.size())+"; expected="+std::to_string(expected_reads.size()));
+                uniform_counter.reset();
+            }
+#endif
+            if (caller_state || full_samplers || pixel_constants || register_pressure || uniform_reads) {
                 if (caller_fault) {
                     const float corrupt[]{123,456,789,1};
                     gpu_check(device.SetPixelShaderConstantF(12,corrupt,1),"Inject caller-state corruption");
@@ -684,7 +770,7 @@ int main(int argc,char** argv) {
             if (!correct) throw std::runtime_error("Tracked inverse matrices, fog camera or view rotation content mismatch; frame="+
                 std::to_string(serial));
 #ifdef OLVR_ISOLATED_9ON12
-            const auto draws=benchmark?benchmark_draws:burst?6u:1u;
+            const auto draws=benchmark?benchmark_draws:burst?6u:uniform_reads?2u:1u;
             if (counter.indexed_calls!=draws || counter.plain_calls || counter.instances!=draws*2)
                 throw std::runtime_error("Reconstruction emitted more than one physical geometry draw");
 #endif
@@ -725,7 +811,7 @@ int main(int argc,char** argv) {
             throw std::runtime_error("View upload cache missed identical records, changed uniforms or resource release; uploads="+
                 std::to_string(pipeline.view_uploads()));
 #ifndef OLVR_BASELINE_BENCHMARK
-        if (upload_cache && (pipeline.view_record_builds()!=4 || pipeline.view_record_cache_hits()!=2 ||
+        if (upload_cache && (pipeline.view_record_builds()!=4 || pipeline.view_record_cache_hits()!=(uniform_reads?8u:2u) ||
             pipeline.declaration_builds()!=2))
             throw std::runtime_error("CPU view/declaration cache missed unchanged inputs, uniform changes or reset");
         if (cache_invalidation && (pipeline.view_record_builds()!=5 || pipeline.view_record_cache_hits()!=1 ||
@@ -747,10 +833,10 @@ int main(int argc,char** argv) {
         if (fault) throw std::runtime_error("Untracked inverse reconstruction incorrectly passed");
         if (caller_state) std::cout<<"PASS: precise_caller_state_checks=6; exact_caller_state_preserved; every_float_integer_boolean_shader_constant; all_20_samplers_and_streams; declaration_FVF_switches; changed_caller_literal_mask; viewport_scissor_render_state; ";
         std::cout<<"PASS: per-eye vertex/pixel inverse reconstruction, fog camera, view-to-world rotation, original VTF and constant restoration; frames="<<frames<<"; pixels="
-            <<pixels<<(benchmark?"; one draw/two instances per submission":"; one draw/two instances per frame");
+            <<pixels<<(benchmark || uniform_reads?"; one draw/two instances per submission":"; one draw/two instances per frame");
 #ifdef OLVR_ISOLATED_9ON12
-        std::cout<<"; native_d3d12_draws="<<(benchmark?6*benchmark_draws:frames)
-            <<"; native_d3d12_instances="<<(benchmark?12*benchmark_draws:frames*2);
+        std::cout<<"; native_d3d12_draws="<<(benchmark?6*benchmark_draws:uniform_reads?frames*2:frames)
+            <<"; native_d3d12_instances="<<(benchmark?12*benchmark_draws:uniform_reads?frames*4:frames*2);
 #endif
         if (burst) std::cout<<"; unfenced_draw_burst=6; gpu_readbacks=1";
         if (shadow) std::cout<<"; screen_to_shadow_and_light; native_columns; independent_world_projector_oracle";
@@ -758,7 +844,7 @@ int main(int argc,char** argv) {
         if (billboard_locked) std::cout<<"; authored_world_locked_axes_preserved";
         if (billboard_policy) std::cout<<"; axis_policy_switches=6; unchanged_eye_records; invalidated_camera_axis_cache";
         if (upload_cache) std::cout<<"; view_uploads=4; identical_records_reused; changed_uniform_and_reset_invalidated";
-        if (upload_cache) std::cout<<"; CPU_view_builds=4; CPU_view_cache_hits=2; declaration_builds=2";
+        if (upload_cache) std::cout<<"; CPU_view_builds=4; CPU_view_cache_hits="<<(uniform_reads?8:2)<<"; declaration_builds=2";
         if (cache_invalidation) std::cout<<"; identical_eye_and_uniform_inputs; context_columns_reset_invalidated; CPU_view_builds=5; CPU_view_cache_hits=1; declaration_builds=2; view_uploads=4";
         if (declaration_cache) std::cout<<"; declaration_builds=4; spare_stream_changed; fresh_stream_frequencies; conflicting_declaration_rejected";
         if (index_cache) std::cout<<"; cached_prefix_and_native_nonindexed; supplied_indices_growth_format_reset_invalidated";
@@ -771,6 +857,7 @@ int main(int argc,char** argv) {
         if (motion) std::cout<<"; native_motion_policy_zeroed_without_mutating_caller_constants";
         if (pixel_constants) std::cout<<"; paired_pixel_constants_no_texture_reads; full_caller_state_preserved; reset_recovered";
         if (register_pressure) std::cout<<"; pixel_register_pressure_texture_fallback; full_caller_state_preserved; reset_recovered";
+        if (uniform_reads) std::cout<<"; exact_contiguous_native_uniform_reads; changed_source_uniform_observed; full_caller_state_preserved; reset_recovered; separate_counter_warmup_draws=6";
         if (benchmark) {
             std::cout<<"; benchmark_submission_us=[";
             for (unsigned index=0;index<submission_us.size();++index)
