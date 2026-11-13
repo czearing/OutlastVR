@@ -6,6 +6,7 @@
 #ifdef OLVR_ISOLATED_9ON12
 #include "isolated_d3d12_counter.h"
 #endif
+#include <chrono>
 #include <iostream>
 
 using namespace olvr;
@@ -24,15 +25,18 @@ int main(int argc,char** argv) {
         const std::string mode=argc>1?argv[1]:"";
         if (argc>2 || (!mode.empty() && mode!="--fault-atlas" && mode!="--fault-camera" &&
                        mode!="--fault-material" && mode!="--fault-scissor" && mode!="--fault-lookup-state" &&
-                       mode!="--hit-effects" && mode!="--fault-hit-effects"))
+                       mode!="--hit-effects" && mode!="--fault-hit-effects" &&
+                       mode!="--overdraw-benchmark" && mode!="--hit-benchmark"))
             throw std::invalid_argument("Unknown atlas-routing control");
         const bool fault_atlas=mode=="--fault-atlas",fault_camera=mode=="--fault-camera";
         const bool fault_material=mode=="--fault-material";
         const bool fault_scissor=mode=="--fault-scissor";
         const bool fault_lookup_state=mode=="--fault-lookup-state";
-        const bool hit_effects=mode=="--hit-effects" || mode=="--fault-hit-effects";
+        const bool benchmark=mode=="--overdraw-benchmark" || mode=="--hit-benchmark";
+        const bool hit_effects=mode=="--hit-effects" || mode=="--fault-hit-effects" || mode=="--hit-benchmark";
         const bool fault_hit=mode=="--fault-hit-effects";
-        constexpr UINT eye_width=64,height=16;
+        const UINT eye_width=benchmark?1024:64,height=benchmark?512:16;
+        const UINT repeats=benchmark?64:1,frames=benchmark?6:12;
         IsolatedDevice isolated(eye_width*2,height);
         auto& device=*isolated.device.get();
         const char* vertex_source=R"(
@@ -40,7 +44,7 @@ int main(int argc,char** argv) {
             struct Output {float4 position:POSITION;float2 uv:TEXCOORD0;};
             Output main(float2 position:POSITION) {
                 Output output;output.position=mul(float4(position,0,1),ViewProjectionMatrix);
-                output.uv=position*float2(.5,-.5)+.5+float2(.5/64,.5/16);return output;
+                output.uv=position*float2(.5,-.5)+.5+float2(.5/EYE_WIDTH,.5/EYE_HEIGHT);return output;
             })";
         const char* pixel_source=R"(
             SamplerState Scene:register(s0);
@@ -57,11 +61,19 @@ int main(int argc,char** argv) {
                 sampleUV+=centered*dot(centered,centered)*HitEffect.x+HitEffect.yz;
                 float4 scene=tex2D(Scene,sampleUV+float2(Params.w,0));
                 float material=tex2D(Material,uv).r;
-                return lerp(float4(scene.rg*material,CameraPositionPS.x*.25,1),HitColor,HitEffect.w);
+                float4 color=lerp(float4(scene.rg*material,CameraPositionPS.x*.25,1),HitColor,HitEffect.w);
+                #ifdef TRANSPARENT_BENCHMARK
+                color.a=.5;
+                #endif
+                return color;
             })";
-        auto compile=[](const char* source,const char* profile,Com<ID3DBlob>& code) {
+        const auto width_text=std::to_string(eye_width),height_text=std::to_string(height);
+        const D3D_SHADER_MACRO defines[]{
+            {"EYE_WIDTH",width_text.c_str()},{"EYE_HEIGHT",height_text.c_str()},
+            {benchmark?"TRANSPARENT_BENCHMARK":nullptr,benchmark?"1":nullptr},{nullptr,nullptr}};
+        auto compile=[&](const char* source,const char* profile,Com<ID3DBlob>& code) {
             Com<ID3DBlob> errors;
-            const auto status=D3DCompile(source,std::strlen(source),"atlas-routing",nullptr,nullptr,
+            const auto status=D3DCompile(source,std::strlen(source),"atlas-routing",defines,nullptr,
                 "main",profile,D3DCOMPILE_ENABLE_STRICTNESS,0,code.put(),errors.put());
             if (FAILED(status)) {
                 const std::string message=errors.get()?std::string(
@@ -87,6 +99,11 @@ int main(int argc,char** argv) {
         gpu_check(device.SetVertexDeclaration(declaration.get()),"Bind original atlas declaration");
         gpu_check(device.SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE),"Disable atlas culling");
         gpu_check(device.SetRenderState(D3DRS_ZENABLE,FALSE),"Disable atlas depth");
+        if (benchmark) {
+            gpu_check(device.SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE),"Enable transparent overdraw benchmark");
+            gpu_check(device.SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA),"Preserve transparent source alpha");
+            gpu_check(device.SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA),"Preserve transparent destination blend");
+        }
         gpu_check(device.SetRenderState(D3DRS_SCISSORTESTENABLE,TRUE),"Enable original caller scissor");
         Com<IDirect3DTexture9> scene,material;
         gpu_check(device.CreateTexture(eye_width*2,height,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,scene.put(),nullptr),"Create sampled scene atlas");
@@ -94,14 +111,15 @@ int main(int argc,char** argv) {
         D3DLOCKED_RECT locked{};
         gpu_check(scene->LockRect(0,&locked,nullptr,0),"Lock sampled scene atlas");
         for (UINT y=0;y<height;++y) for (UINT x=0;x<eye_width*2;++x) {
-            const DWORD value=96+(x%eye_width)*2+y*2;
+            const DWORD value=benchmark?96+(x%eye_width)*126/eye_width+y*30/height:
+                96+(x%eye_width)*2+y*2;
             reinterpret_cast<DWORD*>(static_cast<char*>(locked.pBits)+y*locked.Pitch)[x]=
                 0xff000000|(x<eye_width?value<<16:value<<8);
         }
         gpu_check(scene->UnlockRect(0),"Unlock sampled scene atlas");
         gpu_check(material->LockRect(0,&locked,nullptr,0),"Lock material ramp");
         for (UINT y=0;y<height;++y) for (UINT x=0;x<eye_width*2;++x) {
-            const DWORD value=64+(x/2)*2;
+            const DWORD value=benchmark?64+(x/2)*128/eye_width:64+(x/2)*2;
             reinterpret_cast<DWORD*>(static_cast<char*>(locked.pBits)+y*locked.Pitch)[x]=0xff000000|value*0x010101;
         }
         gpu_check(material->UnlockRect(0),"Unlock material ramp");
@@ -192,6 +210,13 @@ int main(int argc,char** argv) {
         const float quad[][2]{{-1,-1},{1,-1},{1,1},{-1,-1},{1,1},{-1,1}};
         Com<IDirect3DSurface9> backbuffer,readback;
         Com<IDirect3DQuery9> occlusion;
+        Com<IDirect3DQuery9> timer_start,timer_end,timer_frequency,timer_disjoint;
+        if (benchmark) {
+            gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMP,timer_start.put()),"Create overdraw GPU start");
+            gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMP,timer_end.put()),"Create overdraw GPU end");
+            gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ,timer_frequency.put()),"Create overdraw frequency");
+            gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT,timer_disjoint.put()),"Create overdraw disjoint query");
+        }
         gpu_check(device.CreateQuery(D3DQUERYTYPE_OCCLUSION,occlusion.put()),"Create stereo sample-count oracle");
         gpu_check(device.GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,backbuffer.put()),"Get atlas routing backbuffer");
         gpu_check(device.CreateOffscreenPlainSurface(eye_width*2,height,D3DFMT_A8R8G8B8,
@@ -200,13 +225,13 @@ int main(int argc,char** argv) {
         IsolatedD3D12DrawCounter counter(isolated.translation_device());
 #endif
         UINT checked=0;
-        for (UINT frame=0;frame<12;++frame) {
+        for (UINT frame=0;frame<frames;++frame) {
             const UINT sample_frame=frame%6;
             const D3DVIEWPORT9 full_viewport{0,0,eye_width*2,height,0,1};
             const D3DVIEWPORT9 caller_viewport=frame<6?full_viewport:D3DVIEWPORT9{8,2,96,12,0,1};
             const float parameters[]{1.f/eye_width,1.f/height,float(sample_frame%2),float(int(sample_frame/2)-1)};
             const RECT scissor=frame==11?RECT{10,3,10,3}:
-                frame<6?RECT{0,0,eye_width,height}:RECT{10,3,55,13};
+                frame<6?RECT{0,0,LONG(eye_width),LONG(height)}:RECT{10,3,55,13};
             const float visible_eyes[]{frame==10?-1.f:1.f,frame==9?-1.f:1.f,0,0};
             const bool hit_active=hit_effects && sample_frame>=1 && sample_frame<=4;
             const float hit[]{hit_active?.35f:0,hit_active?.125f:0,
@@ -228,10 +253,47 @@ int main(int argc,char** argv) {
             const TestD3D9StateSnapshot caller_before(device);
             gpu_check(device.BeginScene(),"Begin routing frame");
             gpu_check(occlusion->Issue(D3DISSUE_BEGIN),"Begin native query around the paired stereo draw");
-            const auto result=pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,2,quad,sizeof(quad),sizeof(quad[0]),views);
-            if (!result.succeeded()) throw std::runtime_error("Single-pass pixel routing or caller restoration failed");
+            if (benchmark) {
+                gpu_check(timer_disjoint->Issue(D3DISSUE_BEGIN),"Begin overdraw timestamp interval");
+                gpu_check(timer_start->Issue(D3DISSUE_END),"Start overdraw GPU workload");
+            }
+            const auto begin=std::chrono::steady_clock::now();
+            for (UINT repeat=0;repeat<repeats;++repeat) {
+                const auto result=pipeline.draw_primitive_up(D3DPT_TRIANGLELIST,2,quad,sizeof(quad),sizeof(quad[0]),views);
+                if (!result.succeeded()) throw std::runtime_error("Single-pass pixel routing or caller restoration failed");
+            }
+            const auto cpu_us=std::chrono::duration<double,std::micro>(
+                std::chrono::steady_clock::now()-begin).count()/repeats;
+            if (benchmark) {
+                gpu_check(timer_end->Issue(D3DISSUE_END),"End overdraw GPU workload");
+                gpu_check(timer_frequency->Issue(D3DISSUE_END),"Issue overdraw GPU frequency");
+                gpu_check(timer_disjoint->Issue(D3DISSUE_END),"End overdraw timestamp interval");
+            }
             gpu_check(occlusion->Issue(D3DISSUE_END),"End native query around the paired stereo draw");
             gpu_check(device.EndScene(),"End routing frame");
+            if (benchmark) {
+                const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+                auto wait=[&](IDirect3DQuery9& query,void* value,UINT bytes) {
+                    for (;;) {
+                        const auto result=query.GetData(value,bytes,D3DGETDATA_FLUSH);
+                        gpu_check(result,"Read isolated overdraw GPU interval");
+                        if (result==S_OK) return;
+                        if (std::chrono::steady_clock::now()>=deadline)
+                            throw std::runtime_error("Overdraw GPU timer timed out");
+                        Sleep(1);
+                    }
+                };
+                UINT64 start=0,end=0,frequency=0;BOOL disjoint=FALSE;
+                wait(*timer_end.get(),&end,sizeof(end));wait(*timer_start.get(),&start,sizeof(start));
+                wait(*timer_frequency.get(),&frequency,sizeof(frequency));
+                wait(*timer_disjoint.get(),&disjoint,sizeof(disjoint));
+                if (disjoint || !frequency || end<start)
+                    throw std::runtime_error("Invalid overdraw GPU timing interval");
+                std::cout<<"BENCHMARK frame="<<frame<<"; warmup="<<(frame==0?1:0)
+                    <<"; eye_width="<<eye_width<<"; eye_height="<<height<<"; draws="<<repeats
+                    <<"; cpu_us_per_draw="<<cpu_us<<"; gpu_us_per_draw="
+                    <<double(end-start)*1000000/double(frequency)/repeats<<'\n';
+            }
             if (fault_lookup_state)
                 gpu_check(device.SetSamplerState(2,D3DSAMP_SRGBTEXTURE,FALSE),"Inject missing lookup-state restoration");
             const TestD3D9StateSnapshot caller_after(device);
@@ -269,7 +331,7 @@ int main(int argc,char** argv) {
                     y>=caller_viewport.Y && y<caller_viewport.Y+caller_viewport.Height;
                 const UINT uv_x=in_viewport?((logical_x-viewport_x)*eye_width*2+viewport_width)/(viewport_width*2):0;
                 const UINT uv_y=in_viewport?((y-caller_viewport.Y)*height*2+caller_viewport.Height)/(caller_viewport.Height*2):0;
-                const int gray=64+uv_x*2;
+                const int gray=benchmark?64+uv_x*128/eye_width:64+uv_x*2;
                 UINT source_x=sample_frame<2?0:sample_frame>=4?eye_width-1:
                     sample_frame%2?logical_x:uv_x;
                 UINT source_y=sample_frame%2?y:uv_y;
@@ -284,7 +346,9 @@ int main(int argc,char** argv) {
                     source_x=UINT(std::clamp(std::floor(warped_u*eye_width),0.,double(eye_width-1)));
                     source_y=UINT(std::clamp(std::floor(warped_v*height),0.,double(height-1)));
                 }
-                const int intensity=((96+source_x*2+source_y*2)*gray+127)/255;
+                const auto source_value=benchmark?96+source_x*126/eye_width+source_y*30/height:
+                    96+source_x*2+source_y*2;
+                const int intensity=(source_value*gray+127)/255;
                 const bool clipped=int(x%eye_width)<scissor.left || int(x%eye_width)>=scissor.right ||
                     int(y)<scissor.top || int(y)>=scissor.bottom || !in_viewport ||
                     (frame==9 && eye==1) || (frame==10 && eye==0);
@@ -295,7 +359,7 @@ int main(int argc,char** argv) {
                 };
                 const bool matches=std::abs(red-expected(eye?0:intensity,0))<=2 &&
                     std::abs(green-expected(!eye?0:intensity,1))<=2 &&
-                    std::abs(blue-expected(eye?128:64,2))<=(hit_effects?2:1);
+                    std::abs(blue-expected(eye?128:64,2))<=((hit_effects || benchmark)?2:1);
                 if (!matches && correct)
                     std::cerr<<"Mismatch frame="<<frame<<" x="<<x<<" y="<<y
                         <<" rgb="<<red<<','<<green<<','<<blue<<" expected="
@@ -310,33 +374,36 @@ int main(int argc,char** argv) {
                 "Cross-eye atlas, material UV or tracked pixel camera content mismatch");
             DWORD samples=UINT_MAX;
             const auto query_result=occlusion->GetData(&samples,sizeof(samples),D3DGETDATA_FLUSH);
-            if (query_result!=S_OK || samples!=expected_samples)
+            if (query_result!=S_OK || samples!=expected_samples*repeats)
                 throw std::runtime_error("Native occlusion did not count the exact two-eye pixel union: status="+
                     std::to_string(query_result)+" actual="+std::to_string(samples)+
-                    " expected="+std::to_string(expected_samples));
+                    " expected="+std::to_string(expected_samples*repeats));
 #ifdef OLVR_ISOLATED_9ON12
             // LockRect waits for translated GPU work; GetRenderTargetData alone can return before emission.
-            if (counter.indexed_calls!=1 || counter.plain_calls || counter.instances!=2)
+            if (counter.indexed_calls!=repeats || counter.plain_calls || counter.instances!=repeats*2)
                 throw std::runtime_error("Correct stereo pixels but inconclusive physical draw instrumentation: indexed="+
                     std::to_string(counter.indexed_calls.load())+" plain="+
                     std::to_string(counter.plain_calls.load())+" instances="+
                     std::to_string(counter.instances.load()));
 #endif
         }
-        if (!mode.empty() && mode!="--hit-effects")
+        if (!mode.empty() && mode!="--hit-effects" && !benchmark)
             throw std::runtime_error("Pixel routing incorrectly accepted a negative control");
         Com<IDirect3DBaseTexture9> unused;
         gpu_check(device.GetTexture(15,unused.put()),"Check unused atlas sampler restoration");
         if (unused.get()!=scene.get()) throw std::runtime_error("Declared-sampler optimization changed an unused binding");
-        std::cout<<"PASS: eye-local UV and VPOS, atlas border isolation, unchanged same-size material UV, tracked per-eye pixel camera, half-open stereo scissor and disjoint offset native viewports; frames=12; pixels="
-                 <<checked<<"; one draw/two instances per frame; caller restored; original screen projection preserved"
+        std::cout<<"PASS: eye-local UV and VPOS, atlas border isolation, unchanged same-size material UV, tracked per-eye pixel camera, half-open stereo scissor and disjoint offset native viewports; frames="<<frames<<"; pixels="
+                 <<checked<<(benchmark?"; one draw/two instances per submission":"; one draw/two instances per frame")
+                 <<"; caller restored; original screen projection preserved"
                  <<"; declared_sampler_scan; unused_atlas_untouched; cube_conflict_rejected; exact_stereo_occlusion_samples"
                  <<"; point_lookup_complete_caller_state; native_point_linear_variant_separation"
                  <<"; left_only_query; right_only_query; occluded_both_query";
-        if (hit_effects) std::cout<<"; hit_style_radial_distortion_XY_offsets_and_flash; two_transient_cycles; neutral_recovery";
+        if (hit_effects) std::cout<<"; hit_style_radial_distortion_XY_offsets_and_flash"
+            <<(benchmark?"; one_transient_cycle":"; two_transient_cycles")<<"; neutral_recovery";
 #ifdef OLVR_ISOLATED_9ON12
-        std::cout<<"; native_d3d12_draws=12; native_d3d12_instances=24";
+        std::cout<<"; native_d3d12_draws="<<frames*repeats<<"; native_d3d12_instances="<<frames*repeats*2;
 #endif
+        if (benchmark) std::cout<<"; synthetic_fullscreen_alpha_overdraw; not_retail_water_or_headset_FPS";
         std::cout<<'\n';
         return 0;
     } catch (const std::exception& error) {

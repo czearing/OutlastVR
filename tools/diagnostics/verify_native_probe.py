@@ -278,11 +278,34 @@ def render_profile(projected):
                   scope="CPU render work starts after XR wait and ends before XR transport. "
                   "Asynchronous GPU timestamps cover that rendering interval, not compositor or XR copy cost. "
                   "The instrumented no-headset runtime is not a headset FPS benchmark.")
+    identified = [f for f in projected if "native_frame" in f]
+    require(not identified or len(identified) == len(projected),
+            "Mixed native frame identities in rendering profile")
+    require(all(type(f["native_frame"]) is int and f["native_frame"] >= 0 for f in identified),
+            "Invalid native frame identity in rendering profile")
+    sources = {f["native_frame"] for f in identified}
+    require(len(sources) == len(identified), "Duplicate native frame identity in rendering profile")
+    gpu_samples = {}
+    for frame in projected:
+        require(all(math.isfinite(frame[key]) and frame[key] >= 0
+                    for key in ("cpu_render_us", "xr_wait_us")), "Invalid CPU rendering/pacing time")
+        if frame["gpu_timing_status"] != 2:
+            continue
+        serial, value = frame["gpu_timing_frame"], frame["gpu_work_us"]
+        require(type(serial) is int and serial >= 0, "Invalid GPU source frame identity")
+        require("native_frame" not in frame or serial <= frame["native_frame"],
+                "GPU timing refers to a future native frame")
+        require(math.isfinite(value) and value >= 0, "Invalid GPU rendering time")
+        require(serial not in gpu_samples or gpu_samples[serial] == value,
+                "Conflicting GPU timings for the same native frame")
+        gpu_samples[serial] = value
+    result["unattributed_gpu_samples"] = sum(serial not in sources for serial in gpu_samples)
     for panel, label in ((True, "menu"), (False, "gameplay")):
         frames = [f for f in projected if f["world_panel"] == panel][30:]
         if not frames:
             continue
-        gpu = {f["gpu_timing_frame"]: f["gpu_work_us"] for f in frames if f["gpu_timing_status"] == 2}
+        selected = {f["native_frame"] for f in frames if "native_frame" in f}
+        gpu = {serial: value for serial, value in gpu_samples.items() if serial in selected}
         result[label] = dict(frames=len(frames), cpu_render=summarize([f["cpu_render_us"] for f in frames]),
                              xr_wait=summarize([f["xr_wait_us"] for f in frames]),
                              gpu_timing_states={str(state): sum(f["gpu_timing_status"] == state for f in frames)

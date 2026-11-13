@@ -32,6 +32,7 @@ REQUIRED_TESTS = {
     "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
     "test_integrated_material_constants",
     "test_native_uniform_read_batching",
+    "test_transparent_overdraw_stereo", "test_transparent_hit_overdraw",
     "python_regressions",
 }
 DLL_MODES = (
