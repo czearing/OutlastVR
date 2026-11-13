@@ -1,0 +1,16 @@
+{
+  "version": "0.1.0-rc.6",
+  "changes": [
+    "Fixed enemies freezing after hiding.",
+    "Fixed hand shadows not following the controllers.",
+    "Fixed night vision not matching the original game.",
+    "Fixed crashes when being grabbed or thrown.",
+    "Fixed black screens after dying.",
+    "Removed loading-screen artwork during checkpoint reloads, leaving a black transition."
+  ],
+  "known_issues": [
+    "Performance can drop in water-heavy areas.",
+    "Some hit effects and scripted grabs can feel off in VR.",
+    "Physical camcorder controls remain experimental and are off by default."
+  ]
+}
