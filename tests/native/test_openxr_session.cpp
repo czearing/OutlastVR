@@ -67,6 +67,7 @@ struct Mock {
     bool flat_test=false,flat_frame=false,flat_after_world=false;
     bool ui=false,ui_scissor=false;
     bool upright_camera=false;
+    XrVector3f native_camera_offset_m{};
     RECT ui_viewport{0,0,256,256};
     XrQuaternionf ui_head{0,0,0,1};
     UINT ui_checked=0;
@@ -669,9 +670,9 @@ bool inspect_gpu_eyes() {
                 continue;
             }
             const double disparity = sums[1][group] / counts[1][group] - sums[0][group] / counts[0][group];
-            const double x = group == 0 ? -.6 : .9;
+            const double x = (group == 0 ? -.6 : .9)-mock.native_camera_offset_m.x;
             const double depth = (group == 0 ? 2. : 6.) +
-                (mock.recentered?0:mock.views[0].pose.position.z);
+                (mock.recentered?0:mock.views[0].pose.position.z)-mock.native_camera_offset_m.z;
             double expected_x[2]{};
             for (UINT eye = 0; eye < 2; ++eye) {
                 const auto& view = mock.views[eye];
@@ -682,7 +683,7 @@ bool inspect_gpu_eyes() {
                                           (right+left)/(right-left) + 1);
                 if (mock.upright_camera) {
                     const double top=std::tan(double(view.fov.angleUp)),bottom=std::tan(double(view.fov.angleDown));
-                    const double world_y=group==0?-.35:.6;
+                    const double world_y=(group==0?-.35:.6)-mock.native_camera_offset_m.y;
                     const double eye_y=mock.comfort_seated?0:(view.pose.position.y-.01)/mock.comfort_world_scale;
                     const double expected_y=128*(1-2*(world_y-eye_y)/((top-bottom)*depth)+(top+bottom)/(top-bottom));
                     const double x_error=std::abs(sums[eye][group]/counts[eye][group]-expected_x[eye]);

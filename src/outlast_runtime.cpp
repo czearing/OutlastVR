@@ -344,6 +344,7 @@ class Runtime {
     std::mutex camera_pose_mutex_;
     UINT64 camera_pose_serial_=0;
     OutlastLocomotionCamera locomotion_camera_;
+    bool native_camera_handoff_=false;
     struct CameraCapture {
         void* camera;
         std::optional<OutlastLocomotionSample> sample;
@@ -1688,15 +1689,21 @@ class Runtime {
         if (tracking) {
             std::lock_guard<std::mutex> lock(camera_pose_mutex_);
             locomotion=locomotion_camera_.locate(decoded->camera.tracking.origin);
-            if (!locomotion) {
+            if (locomotion) {
+                tracking_frame.origin=locomotion->origin;
+                ++stats_.camera_pose_matches;
+                if (locomotion->stabilized) ++stats_.camera_stabilized_views;
+            }
+            // A valid rendered view need not belong to the observed hero camera.
+            // Only a linked pose may supply comfort correction or tracked-body targets.
+            if (!locomotion && !native_camera_handoff_) {
                 const auto origin=decoded->camera.tracking.origin;
-                throw std::runtime_error("Owned native gameplay view has no matching completed camera pose; origin="+
+                log("Native view outside comfort-camera history; preserving native origin without body tracking; origin="+
                     std::to_string(origin.x)+","+std::to_string(origin.y)+","+std::to_string(origin.z)+
                     "; observed_base_serial="+std::to_string(camera_pose_serial_));
-            }
-            tracking_frame.origin=locomotion->origin;
-            ++stats_.camera_pose_matches;
-            if (locomotion->stabilized) ++stats_.camera_stabilized_views;
+            } else if (locomotion && native_camera_handoff_)
+                log("Native hero camera restored; linked comfort tracking resumed");
+            native_camera_handoff_=!locomotion;
         }
         if (tracking && locomotion) publish_body(tracking_frame,*locomotion);
         else if (located && bone_name_) {

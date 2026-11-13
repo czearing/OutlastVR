@@ -553,6 +553,7 @@ int main(int argc,char** argv) {
             mode=="--ui-scaleform" || mode=="--ui-scaleform-handoff" ||
             mode=="--camera-tilt" || mode=="--fault-camera-tilt" ||
             mode=="--camera-bob" || mode=="--fault-camera-bob" ||
+            mode=="--camera-handoff" || mode=="--fault-camera-handoff" ||
             mode=="--fault-containment" || mode=="--fault-crosshair" || mode=="--fault-translucency-bounds" ||
             mode=="--fault-reset-thread" || mode=="--fault-reset-reentrant" || mode=="--fault-joystick-focus" ||
             mode=="--floor-startup" || mode=="--comfort" || mode=="--comfort-fault-scale" ||
@@ -608,7 +609,8 @@ int main(int argc,char** argv) {
             mock.comfort_world_scale=2.f;
         }
         const bool camera_tilt=mode=="--camera-tilt" || mode=="--fault-camera-tilt";
-        const bool camera_bob=mode=="--camera-bob" || mode=="--fault-camera-bob";
+        const bool camera_handoff=mode=="--camera-handoff" || mode=="--fault-camera-handoff";
+        const bool camera_bob=mode=="--camera-bob" || mode=="--fault-camera-bob" || camera_handoff;
         mock.upright_camera=camera_tilt || camera_bob || comfort_mode;
         const float pitch=camera_tilt?.35f:0.f,roll=camera_tilt?.18f:0.f;
         const TrackingFrame frame{{0,0,0},
@@ -782,11 +784,26 @@ int main(int argc,char** argv) {
             }
             if (camera_bob) {
                 auto animated=frame;
-                animated.origin=f?Vec3{10*std::sin(float(f)),12*std::sin(float(f)*.7f),
+                animated.origin=f && (!camera_handoff || f%10!=4)?
+                    Vec3{10*std::sin(float(f)),12*std::sin(float(f)*.7f),
                                        6*std::sin(float(f)*.8f)}:Vec3{};
                 camera_base_pose[0]=animated.origin.x;
                 camera_base_pose[1]=animated.origin.y;
                 camera_base_pose[2]=animated.origin.z;
+                if (camera_handoff) {
+                    const bool unlinked=f%10==2 || f%10==3;
+                    const bool forged=unlinked && mode=="--fault-camera-handoff";
+                    write(camera_hero.data(),0x7bc,BYTE(unlinked && !forged?2:0));
+                    write(camera_hero.data(),0x7bd,BYTE(unlinked && !forged?70:0));
+                    write(camera_object.data(),0x118,UINT(unlinked && !forged?0:2));
+                    if (unlinked) animated.origin={42,-73,5};
+                    mock.native_camera_offset_m=unlinked?XrVector3f{.42f,-.73f,.05f}:XrVector3f{};
+                    if (forged) {
+                        camera_base_pose[0]=animated.origin.x;
+                        camera_base_pose[1]=animated.origin.y;
+                        camera_base_pose[2]=animated.origin.z;
+                    }
+                }
                 const auto moved=eye_constants(animated,{{0,0,0},{0,0,0,1}},
                     {-.8f,.85f,.75f,-.7f},1,10000);
                 for (unsigned row=0;row<4;++row) for (unsigned column=0;column<4;++column)
@@ -795,11 +812,11 @@ int main(int argc,char** argv) {
                 write(view_data.data(),0x3a0,animated.origin);
             }
             lean_tick_stub(lean_node.data(),.015f);
-            const bool scripted_effect=f>=2 && f<=4;
-            if (f==2) resumed_effect_mode=native_effects[0x3b8];
+            const bool scripted_effect=(f>=2 && f<=4) || (camera_handoff && f>=12 && f<=14);
+            if (f==2 || (camera_handoff && f==12)) resumed_effect_mode=native_effects[0x3b8];
             if (scripted_effect)
-                native_effects[0x3b8]=f==2?3:f==3?4:255;
-            else if (f==5) native_effects[0x3b8]=resumed_effect_mode;
+                native_effects[0x3b8]=f%10==2?3:f%10==3?4:255;
+            else if (f==5 || (camera_handoff && f==15)) native_effects[0x3b8]=resumed_effect_mode;
             const auto effects_before=native_effects;
             const auto lights_before=native_night_lights;
             const auto calls_before=native_effect_calls;
@@ -809,8 +826,8 @@ int main(int argc,char** argv) {
                     native_effect_calls==calls_before,
                     "Night vision overwrote a native scripted camera effect or light");
                 ++scripted_effect_checks;
-            } else if (f==5) {
-                require(scripted_effect_checks==3,
+            } else if (f==5 || (camera_handoff && f==15)) {
+                require(scripted_effect_checks==(f==5?3u:6u),
                     "Native camera updates did not survive every scripted effect");
                 std::cout<<"PASS: native_scripted_effects_preserved; modes=3,4,255; "
                     <<"production_camera_update_continued\n";
@@ -1100,8 +1117,12 @@ int main(int argc,char** argv) {
             require(counts.thread_handoffs>=20,"Native render/Present ownership did not move between threads");
         if (mock.ui) require(counts.ui_draws==20 && counts.ui_plane_draws==16 && mock.ui_checked>1000000,
             "Menu draws did not use the finite-depth single-pass UI plane");
-        if (camera_bob) require(counts.camera_pose_matches==16 && counts.camera_stabilized_views==16,
-            "Native translation stabilization did not cover every tracked projection");
+        const unsigned expected_camera_matches=camera_handoff?12u:16u;
+        if (camera_bob) require(counts.camera_pose_matches==expected_camera_matches &&
+            counts.camera_stabilized_views==expected_camera_matches,
+            "Native translation stabilization count differs; linked="+std::to_string(counts.camera_pose_matches)+
+            "; stabilized="+std::to_string(counts.camera_stabilized_views)+
+            "; expected="+std::to_string(expected_camera_matches));
         const float center[]{0,0,200,0},radius=1;
         require(sphere_stub(view_data.data()+0x3b0,center,&radius)==0,"Owned native culling scope leaked after dispatch");
         RECT outside_bounds{};
@@ -1145,8 +1166,11 @@ int main(int argc,char** argv) {
         if (ui_scaleform) std::cout<<"; native_scaleform_scope";
         if (camera_tilt) std::cout<<"; native_body_pitch_roll=0.35,0.18; absolute_eye_centroids=64; headset_gravity_upright";
         if (camera_bob) {
-            std::cout<<"; animated_native_translation_removed; absolute_eye_centroids=64; completed_camera_pose_matches=16";
+            std::cout<<"; animated_native_translation_removed; absolute_eye_centroids=64; completed_camera_pose_matches="
+                <<expected_camera_matches;
         }
+        if (camera_handoff) std::cout<<"; native_camera_handoffs=2; unlinked_views=4; "
+            <<"native_origins_preserved; gameplay_stabilization_resumed";
         std::cout<<'\n';
         return 0;
     } catch (const std::exception& error) {

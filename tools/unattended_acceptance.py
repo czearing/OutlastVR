@@ -27,12 +27,12 @@ REQUIRED_TESTS = {
     "test_material_world_position_native", "test_material_full_samplers",
     "test_integrated_mod", "test_integrated_reset_retry", "test_integrated_flat_wrap",
     "test_integrated_thread_overlap", "test_integrated_ui_scaleform_handoff",
-    "test_integrated_camera_bob", "test_integrated_floor_startup",
+    "test_integrated_camera_bob", "test_integrated_camera_handoff", "test_integrated_floor_startup",
     "python_regressions",
 }
 DLL_MODES = (
     "", "--thread-handoff", "--thread-overlap", "--ui", "--ui-in-renderer",
-    "--ui-scaleform", "--ui-scaleform-handoff", "--camera-tilt", "--camera-bob",
+    "--ui-scaleform", "--ui-scaleform-handoff", "--camera-tilt", "--camera-bob", "--camera-handoff",
     "--floor-startup", "--comfort", "--snap", "--snap-recovery", "--ipd-cycle",
     "--input-chords", "--input-recovery", "--reset-retry",
     "--flat-transitions", "--flat-upload", "--flat-wrap",
@@ -43,6 +43,7 @@ DLL_REJECTIONS = {
     "--fault-ui-mono": "Compositor projected ray alignment failed:",
     "--fault-flat-mono": "Compositor projected ray alignment failed:",
     "--fault-camera-bob": "Compositor upright camera alignment failed:",
+    "--fault-camera-handoff": "Compositor upright camera alignment failed:",
     "--fault-camera-tilt": "Compositor upright camera alignment failed:",
     "--comfort-fault-scale": "Compositor disparity failed:",
     "--fault-snap": "Compositor projected ray alignment failed:",
@@ -221,10 +222,18 @@ def main(argv=None):
         for cycle in range(args.cycles):
             for mode in DLL_MODES:
                 name = mode.removeprefix("--") or "default"
+                markers = [
+                    "PASS: integrated production DLL; native_frames=20;", "XR_cleanup_handles=4",
+                    "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;",
+                    "PASS: native_scripted_effects_preserved; modes=3,4,255; production_camera_update_continued",
+                ]
+                if mode == "--camera-handoff":
+                    markers += [
+                        "completed_camera_pose_matches=12; native_camera_handoffs=2; unlinked_views=4; "
+                        "native_origins_preserved; gameplay_stabilization_resumed",
+                    ]
                 run(f"dll-{cycle:04}-{name}", [paths["integrated"], module, retail] + ([mode] if mode else []),
-                    ["PASS: integrated production DLL; native_frames=20;", "XR_cleanup_handles=4",
-                     "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;",
-                     "PASS: native_scripted_effects_preserved; modes=3,4,255; production_camera_update_continued"])
+                    markers)
         for mode, diagnostic in DLL_REJECTIONS.items():
             run("reject-" + mode.removeprefix("--"), [paths["integrated"], module, retail, mode],
                 ["REJECTED: compositor stereo content or single-draw contract failed", diagnostic,
