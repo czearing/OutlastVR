@@ -25,6 +25,9 @@ Lower the rendering resolution in your headset runtime, then restart the game.
 Use the runtime's headset frame-time display when comparing settings. The
 desktop mirror shows the left eye, not a stereo preview or headset frame-time
 measurement.
+The mod disables native gameplay frame smoothing in memory; it does not edit
+your game INI. A removed frame cap does not guarantee that heavy water scenes
+fit the headset's frame budget.
 
 Disable other injectors and conflicting overlays before reproducing a crash
 or rendering problem. Do not replace `d3d9.dll` or copy Windows system DLLs

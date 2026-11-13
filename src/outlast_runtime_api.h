@@ -70,11 +70,15 @@ struct RuntimeBindings {
     OutlastCameraEffect normal_effect=nullptr,camera_effect=nullptr;
     OutlastNightLight night_light=nullptr;
     void** movie_player=nullptr;
+    void** frame_rate_engine=nullptr;
+    CameraUpdateEntry night_light_tick=nullptr;
+    float*(WINAPI* actor_matrix)(void*,float*)=nullptr;
+    void(WINAPI* light_rotation)(void*,const INT*)=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=13;
+    UINT version=14;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};

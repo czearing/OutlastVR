@@ -1,9 +1,33 @@
 #pragma once
 #include "openxr_motion_input.h"
+#include "outlast_camcorder.h"
+#include "stereo_reconstruction.h"
 #include <algorithm>
 #include <optional>
 
 namespace olvr {
+
+struct OutlastNightLightPose {
+    Vec3 translation;
+    std::array<INT,3> rotation;
+};
+inline OutlastNightLightPose outlast_night_light_pose(const TrackingFrame& tracking,
+    EyePose head,const Matrix4& actor_to_world,INT hero_yaw) {
+    if (!std::isfinite(tracking.units_per_meter) || tracking.units_per_meter<=0)
+        throw std::invalid_argument("Invalid native night-light world scale");
+    const auto world=add(tracking.origin,
+        scale(map_tracking(tracking,head.position),tracking.units_per_meter));
+    const auto inverse=matrix_inverse(actor_to_world);
+    const Vec3 local{
+        world.x*inverse[0]+world.y*inverse[4]+world.z*inverse[8]+inverse[12],
+        world.x*inverse[1]+world.y*inverse[5]+world.z*inverse[9]+inverse[13],
+        world.x*inverse[2]+world.y*inverse[6]+world.z*inverse[10]+inverse[14]};
+    if (!finite(local)) throw std::invalid_argument("Nonfinite native night-light translation");
+    auto rotation=camcorder_native_rotation(tracking,head);
+    rotation[1]=INT(std::uint32_t(rotation[1])-std::uint32_t(hero_yaw));
+    rotation[2]=0;
+    return {local,rotation};
+}
 
 class OutlastNightVision {
     bool enabled_=false,blocked_=true,down_=false;

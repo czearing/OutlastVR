@@ -39,6 +39,10 @@ controls. `automated_passed` records automated results, not headset or campaign
 approval. Mock runtimes and retained captures cover only the scenarios exercised.
 The transient-effect fixture checks synthetic radial distortion, two-axis offsets,
 flash tint and recovery. It does not establish the retail hit effect's appearance.
+The hit-comfort fixture separately checks rotation/zoom removal, unchanged damage
+mask/tint, retained movie offsets and the opt-in shader policy using real GPU pixels.
+Native-light fixtures check the rendered head midpoint, root/yaw rebasing, one
+original light tick and deferral during scripts, stale poses and tracking/focus loss.
 
 ## Headset playtest
 
@@ -58,8 +62,12 @@ flash tint and recovery. It does not establish the retail hit effect's appearanc
   Check tracking recovery and that rendered shadows follow the tracked hands.
 - Compare night vision with the original game in the same scene. Check
   illumination, color, glass, transparent materials and particles in both eyes.
-- Take repeated hits with night vision on and off. Check flash, distortion,
-  camera motion and recovery in both eyes, including a hit followed by death/reload.
+  Turn, tilt and translate the headset without turning the body; illumination must
+  follow the head. Repeat while leaning and after recentering.
+- Take repeated hits with night vision on and off. With `hit_distortion=false`,
+  check that damage tint remains without hit-induced image rotation or zoom.
+  Restart with `hit_distortion=true` to compare stock warping. Check recovery,
+  scripted effects and a hit followed by death/reload under both settings.
 - Exercise each available headset/controller/runtime combination. Include
   hybrid-GPU laptops where available.
 - Run extended sessions with repeated save/load cycles. Record headset frame
@@ -89,6 +97,9 @@ save and route unchanged between builds. Record CPU/GPU, driver, headset,
 connection method, DLL hash and settings hash. Disable recording, overlays and
 extra injectors for the baseline; test their overhead separately. Do not change
 quality or add foveation/upscaling to make an optimization pass.
+VR disables the native gameplay frame-smoothing flag for its process without
+editing `OLEngine.ini`. This removes the stock frame-rate ceiling, not the water
+scene's CPU/GPU cost; verify the route rather than treating uncapping as a pass.
 
 After 30 seconds of warmup, capture at least 120 seconds per steady route.
 Repeat baseline/candidate in ABBA order twice. Also retain the first cold pass
@@ -105,6 +116,7 @@ and do not count intentional `xrWaitFrame` pacing as CPU rendering work.
 
 | Refresh | Frame budget | p95 work target |
 | --- | --- | --- |
+| 60 Hz | 16.67 ms | 14.17 ms |
 | 72 Hz | 13.89 ms | 11.81 ms |
 | 80 Hz | 12.50 ms | 10.63 ms |
 | 90 Hz | 11.11 ms | 9.44 ms |

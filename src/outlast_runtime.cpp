@@ -337,6 +337,10 @@ class Runtime {
     CameraBaseEntry original_camera_base_=nullptr;
     CameraUpdateEntry original_camera_update_=nullptr;
     CameraUpdateEntry original_lean_tick_=nullptr;
+    CameraUpdateEntry original_night_light_tick_=nullptr;
+    float*(WINAPI* actor_matrix_)(void*,float*)=nullptr;
+    void(WINAPI* light_rotation_)(void*,const INT*)=nullptr;
+    void** frame_rate_engine_=nullptr;
     using HeroCastEntry=void*(WINAPI*)(void*);
     HeroCastEntry hero_cast_=nullptr;
     std::ofstream probe_camera_poses_;
@@ -345,6 +349,7 @@ class Runtime {
     std::unordered_map<std::uintptr_t,float> lean_weights_;
     std::mutex camera_pose_mutex_;
     UINT64 camera_pose_serial_=0;
+    std::uintptr_t observed_camera_=0,observed_hero_=0;
     OutlastLocomotionCamera locomotion_camera_;
     bool native_camera_handoff_=false;
     struct CameraCapture {
@@ -396,6 +401,13 @@ class Runtime {
         MotionFrame motion{};
     };
     std::optional<BodyFrame> body_frame_;
+    struct HeadFrame {
+        TrackingFrame tracking;
+        EyePose pose;
+        OutlastLocomotionSample native;
+        UINT64 clock;
+    };
+    std::optional<HeadFrame> head_frame_;
     OutlastNativeUseContext native_use_context_{};
     using NativeUseEntry=UINT64(WINAPI*)(void*,INT);
     NativeUseEntry original_pickup_=nullptr,original_use_volume_=nullptr;
@@ -618,7 +630,7 @@ class Runtime {
         menu_window_=creation.hFocusWindow;
         if (!test_ && desktop_cursor_)
             window_cursor_=std::make_unique<OutlastWindowCursor>(menu_window_,*desktop_cursor_,&focused_cursor_client);
-        variants_=std::make_unique<D3D9ShaderVariants>(device);
+        variants_=std::make_unique<D3D9ShaderVariants>(device,config_.comfort.hit_distortion);
         gpu_profile_=std::make_unique<D3D9FrameProfile>(device);
         com_hook(&device,18,&backbuffer);com_hook(&device,37,&set_target);
         com_hook(&device,47,&set_viewport);com_hook(&device,48,&get_viewport);
@@ -638,6 +650,10 @@ class Runtime {
         if (frame_open_) return true;
         if (frame_attempted_) return false;
         frame_attempted_=true;
+        {
+            std::lock_guard<std::mutex> lock(skeleton_mutex_);
+            head_frame_.reset();
+        }
         Internal internal;
         LARGE_INTEGER wait_start{};
         QueryPerformanceCounter(&wait_start);
@@ -646,6 +662,7 @@ class Runtime {
             controller_menu_pointer(false,nullptr);
             std::lock_guard<std::mutex> lock(skeleton_mutex_);
             body_frame_.reset();
+            head_frame_.reset();
             return false;
         }
         motion_controls_.publish(xr().motion_frame(),input_clock());
@@ -715,6 +732,7 @@ class Runtime {
             std::lock_guard<std::mutex> lock(skeleton_mutex_);
             ++body_generation_;
             body_frame_.reset();
+            head_frame_.reset();
         }
         if (xr().floor_known() && !floor_reference_ready_ && !floor_wait_logged_) {
             log("Awaiting tracked positive STAGE height; keeping native camera height; located_height_m="+
@@ -750,6 +768,23 @@ class Runtime {
             passive_hud_constants(tracked_,fovs_,float(width_)/height_);
         return true;
     }
+    EyePose tracked_head() const {
+        const auto a=tracked_[0].orientation,b=tracked_[1].orientation;
+        const float sign=a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w<0?-1.f:1.f;
+        return {scale(add(tracked_[0].position,tracked_[1].position),.5f),
+            bone_normalize({a.x+sign*b.x,a.y+sign*b.y,a.z+sign*b.z,a.w+sign*b.w})};
+    }
+    void publish_head(const TrackingFrame& tracking,const OutlastLocomotionView& view) {
+        const auto now=input_clock();
+        const auto flags=xr().view_state_flags();
+        const auto required=XR_VIEW_STATE_POSITION_TRACKED_BIT|XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
+        const bool current=(flags&required)==required && motion_controls_.sample(now).focused &&
+            !present_panel_ && !native_interactive_menu_.load(std::memory_order_acquire);
+        std::lock_guard<std::mutex> lock(skeleton_mutex_);
+        head_frame_.reset();
+        if (current && !(view.native.flags&4))
+            head_frame_=HeadFrame{tracking,tracked_head(),view.native,now};
+    }
     void publish_body(TrackingFrame& tracking,const OutlastLocomotionView& view) {
         if (!bone_name_) return;
         std::lock_guard<std::mutex> lock(skeleton_mutex_);
@@ -765,10 +800,7 @@ class Runtime {
         targets.controller_fingers=true;
         targets.hand_wristward_m=hand_wristward_m_;
         targets.tracking=tracking;
-        targets.head.position=scale(add(tracked_[0].position,tracked_[1].position),.5f);
-        auto a=tracked_[0].orientation,b=tracked_[1].orientation;
-        const float sign=a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w<0?-1.f:1.f;
-        targets.head.orientation=bone_normalize({a.x+sign*b.x,a.y+sign*b.y,a.z+sign*b.z,a.w+sign*b.w});
+        targets.head=tracked_head();
         const auto frame=motion_controls_.sample(input_clock());
         const bool airborne=outlast_airborne_locomotion(native.basic,native.special);
         const bool mode_supported=native.mode==0 ||
@@ -825,19 +857,22 @@ class Runtime {
         }
         body_frame_=BodyFrame{targets,native,input_clock(),relative_motion};
     }
-    TrackingFrame native_body_tracking(void* hero,const BodyFrame& request) const {
-        auto tracking=request.targets.tracking;
+    TrackingFrame rebase_native_tracking(void* hero,TrackingFrame tracking,
+        const OutlastLocomotionSample& native) const {
         const auto root=field<Vec3>(hero,0x80);
         const auto yaw=field<std::array<INT,3>>(hero,0x8c)[1];
-        const double angle=(double(yaw)-request.native.yaw)*(6.2831853071795864769/65536);
+        const double angle=(double(yaw)-native.yaw)*(6.2831853071795864769/65536);
         auto turn=[&](Vec3 v) {
             return Vec3{float(v.x*std::cos(angle)-v.y*std::sin(angle)),
                 float(v.x*std::sin(angle)+v.y*std::cos(angle)),v.z};
         };
-        tracking.origin=add(root,turn(add(tracking.origin,scale(request.native.root,-1))));
+        tracking.origin=add(root,turn(add(tracking.origin,scale(native.root,-1))));
         tracking.right=turn(tracking.right);tracking.up=turn(tracking.up);
         tracking.backward=turn(tracking.backward);
         return tracking;
+    }
+    TrackingFrame native_body_tracking(void* hero,const BodyFrame& request) const {
+        return rebase_native_tracking(hero,request.targets.tracking,request.native);
     }
     bool camera_claims_use(const MotionFrame& motion,UINT64 now) {
         if (!camcorder_capture_) return false;
@@ -1707,11 +1742,14 @@ class Runtime {
                 log("Native hero camera restored; linked comfort tracking resumed");
             native_camera_handoff_=!locomotion;
         }
-        if (tracking && locomotion) publish_body(tracking_frame,*locomotion);
-        else if (located && bone_name_) {
-            motion_controls_.physical_stance(false,0,false,false,input_clock());
+        if (tracking && locomotion) {
+            publish_body(tracking_frame,*locomotion);
+            publish_head(tracking_frame,*locomotion);
+        } else {
+            if (located && bone_name_) motion_controls_.physical_stance(false,0,false,false,input_clock());
             std::lock_guard<std::mutex> lock(skeleton_mutex_);
             body_frame_.reset();
+            head_frame_.reset();
         }
         for (unsigned eye=0;eye<2;++eye)
             decoded->eyes[eye]=eye_constants(tracking_frame,
@@ -1773,6 +1811,8 @@ class Runtime {
             LARGE_INTEGER clock{};QueryPerformanceCounter(&clock);
             std::lock_guard<std::mutex> lock(r.camera_pose_mutex_);
             const auto serial=++r.camera_pose_serial_;
+            r.observed_camera_=reinterpret_cast<std::uintptr_t>(camera);
+            r.observed_hero_=reinterpret_cast<std::uintptr_t>(hero);
             const auto lean=r.lean_weights_.find(reinterpret_cast<std::uintptr_t>(hero));
             OutlastLocomotionSample sample{};
             sample.serial=serial;sample.camera=reinterpret_cast<std::uintptr_t>(camera);
@@ -1919,6 +1959,41 @@ class Runtime {
                 original_nv_effect_,normal_camera_effect_,original_camera_effect_);
             log(enabled?"Retail night vision enabled":"Retail night vision disabled");
         }
+    }
+    static void WINAPI night_light_tick(void* hero,float elapsed) {
+        guarded([&] {
+            auto& r=self();
+            r.original_night_light_tick_(hero,elapsed);
+            if (r.config_.physical_camcorder || !r.motion_enabled_ ||
+                GetCurrentThreadId()!=r.input_thread_.load(std::memory_order_acquire)) return;
+            auto* engine=r.camcorder_engine_?*r.camcorder_engine_:nullptr;
+            auto* effects=engine?field<void*>(engine,0xa74):nullptr;
+            const auto now=r.input_clock();
+            if (!hero || !effects || field<BYTE>(effects,0x3b8)!=2 || r.menu_state_() ||
+                (field<UINT>(hero,0x2f88)&0x80000) || !r.motion_controls_.sample(now).focused) return;
+            std::optional<HeadFrame> request;
+            {
+                std::lock_guard<std::mutex> lock(r.skeleton_mutex_);
+                request=r.head_frame_;
+            }
+            if (!request || request->native.hero!=reinterpret_cast<std::uintptr_t>(hero) ||
+                now<request->clock || now-request->clock>250000) return;
+            {
+                std::lock_guard<std::mutex> lock(r.camera_pose_mutex_);
+                if (r.observed_hero_!=request->native.hero ||
+                    r.observed_camera_!=request->native.camera) return;
+            }
+            auto* light=field<void*>(hero,0x2d40);
+            if (!light) throw std::runtime_error("Active native night vision has no light component");
+            Matrix4 actor{};
+            if (r.actor_matrix_(hero,actor.data())!=actor.data())
+                throw std::runtime_error("Native actor matrix changed its return contract");
+            const auto pose=outlast_night_light_pose(
+                r.rebase_native_tracking(hero,request->tracking,request->native),
+                request->pose,actor,field<INT>(hero,0x90));
+            std::memcpy(static_cast<BYTE*>(light)+0x210,&pose.translation,sizeof(pose.translation));
+            r.light_rotation_(light,pose.rotation.data());
+        });
     }
     static void WINAPI lean_tick(void* node,float elapsed) {
         guarded([&] {
@@ -2802,6 +2877,15 @@ class Runtime {
             auto& r=self();
             r.input_heartbeat_.store(GetTickCount64(),std::memory_order_release);
             r.input_thread_.store(GetCurrentThreadId(),std::memory_order_release);
+            if (auto* engine=r.frame_rate_engine_?*r.frame_rate_engine_:nullptr) {
+                // Match retail UNCAPFPS without changing the persistent gameplay INI.
+                auto flags=field<UINT>(engine,0x3f8);
+                if (flags&0x200) {
+                    flags&=~0x200u;
+                    std::memcpy(static_cast<BYTE*>(engine)+0x3f8,&flags,sizeof(flags));
+                    log("VR pacing: disabled native frame smoothing for this process; user INI unchanged");
+                }
+            }
             struct PollScope {
                 bool previous=native_input_poll_;
                 PollScope() {native_input_poll_=true;}
@@ -3952,6 +4036,14 @@ class Runtime {
     }
     void bind_native(const RuntimeBindings& bindings) {
         native_movie_player_=bindings.movie_player;
+        frame_rate_engine_=bindings.frame_rate_engine;
+        if (bindings.night_light_tick || bindings.actor_matrix || bindings.light_rotation) {
+            if (!bindings.night_light_tick || !bindings.actor_matrix || !bindings.light_rotation)
+                throw std::invalid_argument("Native headset light requires complete pose bindings");
+            actor_matrix_=bindings.actor_matrix;
+            light_rotation_=bindings.light_rotation;
+            hooks_->add(bindings.night_light_tick,&night_light_tick,original_night_light_tick_);
+        }
         if (bindings.night_vision_engine || bindings.menu_state || bindings.night_effect ||
             bindings.normal_effect || bindings.camera_effect || bindings.night_light) {
             if (!bindings.night_vision_engine || !bindings.menu_state || !bindings.night_effect ||
@@ -3981,12 +4073,12 @@ class Runtime {
             hooks_->add(bindings.skeleton_evaluate,&skeleton_evaluate,original_skeleton_evaluate_);
         if (bindings.viewport_focus)
             hooks_->add(bindings.viewport_focus,&viewport_focus,original_viewport_focus_);
-        if (bindings.input_tick || bindings.gamepad_state || bindings.gamepad_vibration) {
+        if (bindings.input_tick) hooks_->add(bindings.input_tick,&probe_input_tick,original_input_tick_);
+        if (bindings.gamepad_state || bindings.gamepad_vibration || bindings.gamepads || bindings.gamepad_count) {
             if (!bindings.input_tick || !bindings.gamepad_state || !bindings.gamepad_vibration ||
                 !bindings.gamepads || !bindings.gamepad_count)
                 throw std::invalid_argument("Native motion input requires polling, state and pad inventory bindings");
             gamepads_=bindings.gamepads;gamepad_count_=bindings.gamepad_count;
-            hooks_->add(bindings.input_tick,&probe_input_tick,original_input_tick_);
             hooks_->add(bindings.gamepad_state,&gamepad_state,original_gamepad_state_);
             hooks_->add(bindings.gamepad_vibration,&gamepad_vibration,original_gamepad_vibration_);
         }
@@ -4082,7 +4174,7 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=13 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=14 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;
@@ -4474,6 +4566,9 @@ public:
                     enable_camera_component_=retail_entry<CamcorderEnable>(image,0x1d8570);
                     normal_camera_effect_=retail_entry<CamcorderLower>(image,0xd5b350);
                     original_camera_effect_=retail_entry<CamcorderLower>(image,0xd5b710);
+                    b.night_light_tick=retail_entry<CameraUpdateEntry>(image,0xd5cf30);
+                    b.actor_matrix=retail_entry<decltype(b.actor_matrix)>(image,0x168460);
+                    b.light_rotation=retail_entry<decltype(b.light_rotation)>(image,0x2ca9f0);
                     log("Retail full-view night vision: right thumbstick click; original postprocess chain");
                 }
                 if (motion_enabled_) {
@@ -4502,6 +4597,10 @@ public:
                 if (module_extent_<0x201ebc8)
                     throw std::runtime_error("Native movie-player global lies outside the exact retail image");
                 b.movie_player=reinterpret_cast<void**>(base_+0x201ebc0);
+                if (module_extent_<0x2020f40)
+                    throw std::runtime_error("Native pacing engine lies outside the exact retail image");
+                b.frame_rate_engine=reinterpret_cast<void**>(base_+0x2020f38);
+                b.input_tick=retail_entry<InputTickEntry>(image,0xc4cf90);
                 bind_native(b);
                 if (motion_enabled_ || probe_skeleton_.is_open()) {
                     bone_name_=retail_entry<BoneNameEntry>(image,0xcbc70);
@@ -4522,8 +4621,6 @@ public:
                         std::memcpy(&probe_startup_pad_,&address,sizeof(address));
                         gamepads_=reinterpret_cast<void**>(base_+0x201e310);
                         gamepad_count_=reinterpret_cast<INT*>(base_+0x201e318);
-                        hooks_->add(retail_entry<InputTickEntry>(image,0xc4cf90),
-                            &probe_input_tick,original_input_tick_);
                         hooks_->add(retail_entry<GamepadStateEntry>(image,0xe6b4ac),
                             &gamepad_state,original_gamepad_state_);
                     }

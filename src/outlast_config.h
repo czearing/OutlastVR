@@ -15,6 +15,7 @@ struct OutlastComfortSettings {
     float snap_turn_degrees=0,world_scale=1,vignette_strength=0;
     bool seated=false,left_handed=false,toggle_sprint=false;
     MovementReference movement_reference=MovementReference::game;
+    bool hit_distortion=false;
     unsigned primary_hand() const {return left_handed?0u:1u;}
 };
 struct OutlastConfig {
@@ -56,12 +57,13 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         if (!seen.insert(key).second) throw error("duplicate setting "+key);
         if (key=="experimental.physical_camcorder" || key=="experimental.instant_pickups" ||
             key=="vr.seated" || key=="vr.left_handed" ||
-            key=="vr.toggle_sprint") {
+            key=="vr.toggle_sprint" || key=="vr.hit_distortion") {
             if (value!="true" && value!="false") throw error("expected true or false");
             if (key=="experimental.physical_camcorder") result.physical_camcorder=value=="true";
             else if (key=="experimental.instant_pickups") result.instant_pickups=value=="true";
             else if (key=="vr.seated") result.comfort.seated=value=="true";
             else if (key=="vr.left_handed") result.comfort.left_handed=value=="true";
+            else if (key=="vr.hit_distortion") result.comfort.hit_distortion=value=="true";
             else result.comfort.toggle_sprint=value=="true";
         } else if (key=="vr.snap_turn_degrees" || key=="vr.world_scale" || key=="vr.vignette_strength") {
             std::istringstream number(value);number.imbue(std::locale::classic());

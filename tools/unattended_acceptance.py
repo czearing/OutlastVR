@@ -33,6 +33,7 @@ REQUIRED_TESTS = {
     "test_integrated_material_constants",
     "test_native_uniform_read_batching",
     "test_transparent_overdraw_stereo", "test_transparent_hit_overdraw",
+    "test_outlast_hit_distortion", "test_hit_distortion_gpu", "test_outlast_hit_distortion_packed",
     "python_regressions",
 }
 DLL_MODES = (
@@ -195,6 +196,7 @@ def main(argv=None):
             "hand_collision": binaries / "test_outlast_hand_collision.exe",
             "body_lifecycle": binaries / "test_outlast_body_lifecycle.exe",
             "atlas": binaries / "test_atlas_pixel_routing.exe",
+            "hit_comfort": binaries / "test_outlast_hit_distortion.exe",
         }
         inputs = {name: dict(path=str(path), sha256=sha256(path)) for name, path in paths.items()}
         report["inputs"] = inputs
@@ -236,7 +238,13 @@ def main(argv=None):
                     "PASS: integrated production DLL; native_frames=20;", "XR_cleanup_handles=4",
                     "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;",
                     "PASS: native_scripted_effects_preserved; modes=3,4,255; production_camera_update_continued",
+                    "PASS: native_smoothing_disabled; unrelated_flags_preserved; absent_and_recreated_engine_checked",
                 ]
+                if not mode:
+                    markers += [
+                        "PASS: headset_night_light_midpoint; live_root_yaw_rebased; original_tick_once; "
+                        "scripted_modes_and_stale_pose_preserved; focus_tracking_loss_deferred",
+                    ]
                 if mode == "--camera-handoff":
                     markers += [
                         "completed_camera_pose_matches=12; native_camera_handoffs=2; unlinked_views=4; "
@@ -277,6 +285,14 @@ def main(argv=None):
             expected_code=1)
         run("reject-nonfinite-uniform-read", [paths["uniforms"], "--fault-uniform-nonfinite"],
             ["FAIL: Native reconstruction uniform contains nonfinite values"], expected_code=1)
+        run("reject-headset-light", [paths["integrated"], module, retail, "--fault-headset-light"],
+            ["FAIL: Production headset light correction was never exercised"], expected_code=1)
+        run("reject-frame-pacing", [paths["integrated"], module, retail, "--fault-frame-pacing"],
+            ["FATAL: VR pacing retained smoothing or overwrote unrelated engine flags"],
+            expected_code=0xC0000602)
+        run("reject-hit-comfort", [paths["hit_comfort"], "--fault-hit-distortion"],
+            ["Comfort policy retained hit UV distortion or removed scripted movie offsets"],
+            expected_code=1)
         for name, original in inputs.items():
             if sha256(paths[name]) != original["sha256"]:
                 raise ValueError(f"Input changed during acceptance: {name}")
@@ -285,7 +301,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+7} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+10} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

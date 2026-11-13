@@ -3,6 +3,7 @@
 #include "d3d9_state_restore.h"
 #include "sm3_runtime.h"
 #include "outlast_target_roles.h"
+#include "outlast_hit_distortion.h"
 #include <memory>
 #include <cmath>
 #include <unordered_map>
@@ -65,6 +66,7 @@ class D3D9ShaderVariants {
     std::unordered_map<IDirect3DPixelShader9*,std::unique_ptr<PixelSamplers>> pixel_samplers_;
     std::unordered_map<IDirect3DVertexShader9*,std::unique_ptr<VertexInfo>> vertex_info_;
     D3D9PointAtlasLookup mono_point_atlas_;
+    bool hit_distortion_=true;
     template<class T> static sm3::Words bytecode(T& shader) {
         UINT size=0;
         gpu_check(shader.GetFunction(nullptr,&size),"Read bound shader extent");
@@ -129,7 +131,8 @@ class D3D9ShaderVariants {
 public:
     std::uint64_t state_allocations() const {return state_cache_->allocations;}
     std::uint64_t state_captures() const {return state_cache_->captures;}
-    explicit D3D9ShaderVariants(IDirect3DDevice9& device) {
+    explicit D3D9ShaderVariants(IDirect3DDevice9& device,bool hit_distortion=true):
+        hit_distortion_(hit_distortion) {
         *device_.put()=&device;
         device.AddRef();
     }
@@ -168,7 +171,9 @@ public:
             auto found=mono_cache_.find(key);
             if (found==mono_cache_.end()) {
                 auto created=std::make_unique<MonoVariant>();
-                const auto patched=sm3::patch_mono_atlas(bytecode(*pixel.get()),samplers,points);
+                const auto original=bytecode(*pixel.get());
+                const auto patched=sm3::patch_mono_atlas(hit_distortion_?original:
+                    outlast_without_hit_distortion(original),samplers,points);
                 const std::vector<DWORD> code(patched.pixel.begin(),patched.pixel.end());
                 gpu_check(device_->CreatePixelShader(code.data(),created->pixel.put()),"Create native mono atlas resolve");
                 *created->original.put()=pixel.get();pixel->AddRef();
@@ -242,7 +247,8 @@ public:
         const auto found=cache_.find(key);
         if (found!=cache_.end()) return *found->second->pipeline;
         const auto original_vertex=bytecode(*vertex.get()),original_pixel=bytecode(*pixel.get());
-        auto patched=sm3::patch_pair(original_vertex,original_pixel,
+        auto patched=sm3::patch_pair(original_vertex,hit_distortion_?original_pixel:
+            outlast_without_hit_distortion(original_pixel),
             {atlas_samplers,eye_camera,eye_view,scissor,viewport_transform,tracked_uniforms,ui_plane,points});
         sm3::TrackedPair tracking;
         if (tracked_uniforms) {

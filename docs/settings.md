@@ -18,6 +18,7 @@ folder containing the INI.
 | `vr.movement_reference` | `game` | Movement direction: `game`, `head`, `main_hand` or `off_hand`. |
 | `vr.world_scale` | `1` | World size, from `0.5` to `2`. Larger values make the world appear larger. |
 | `vr.vignette_strength` | `0` | Peripheral dimming during movement, from `0` to `1`. `0` disables it. |
+| `vr.hit_distortion` | `false` | Restore native hit-induced image rotation and zoom. Damage tint and other effects remain enabled. |
 | `experimental.physical_camcorder` | `false` | Opt into the held camcorder in place of full-view night vision. |
 | `experimental.instant_pickups` | `true` | Complete inventory pickups after native admission. `false` retains native animations and completion. |
 

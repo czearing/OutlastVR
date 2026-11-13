@@ -6,6 +6,33 @@ using namespace olvr;
 int main() {
     try {
         auto require=[](bool v) {if (!v) throw std::runtime_error("Night-vision input regression");};
+        const auto close=[&](float a,float b) {require(std::abs(a-b)<.001f);};
+        const TrackingFrame tracking{{10,20,170},{0,1,0},{0,0,1},{-1,0,0},100,{0,0,0}};
+        const EyePose head{{.1f,.2f,-.3f},{0,0,0,1}};
+        auto actor=identity_matrix();
+        actor[12]=10;actor[13]=20;actor[14]=30;
+        auto light=outlast_night_light_pose(tracking,head,actor,0);
+        close(light.translation.x,30);close(light.translation.y,10);close(light.translation.z,160);
+        require(light.rotation==std::array<INT,3>{0,0,0});
+        auto yawed=head;yawed.orientation={0,std::sqrt(.5f),0,std::sqrt(.5f)};
+        light=outlast_night_light_pose(tracking,yawed,actor,0);
+        require(std::abs(light.rotation[1]+16384)<=1 && light.rotation[0]==0);
+        auto pitched=head;pitched.orientation={std::sin(.3926990817f),0,0,std::cos(.3926990817f)};
+        light=outlast_night_light_pose(tracking,pitched,actor,0);
+        require(std::abs(light.rotation[0]-8192)<=1 && light.rotation[1]==0);
+        actor[0]=0;actor[1]=1;actor[4]=-1;actor[5]=0;
+        light=outlast_night_light_pose(tracking,head,actor,16384);
+        close(light.translation.x,10);close(light.translation.y,-30);close(light.translation.z,160);
+        require(light.rotation[1]==-16384);
+        auto scaled=actor;
+        for (unsigned row=0;row<3;++row) for (unsigned column=0;column<3;++column)
+            scaled[row*4+column]*=2;
+        light=outlast_night_light_pose(tracking,head,scaled,16384);
+        close(light.translation.x,5);close(light.translation.y,-15);close(light.translation.z,80);
+        bool bad_matrix=false;
+        try {outlast_night_light_pose(tracking,head,Matrix4{},0);}
+        catch (const std::invalid_argument&) {bad_matrix=true;}
+        require(bad_matrix);
         OutlastNightVision filter;
         MotionFrame motion{};motion.focused=true;motion.hands[1].grip_tracked=true;
         motion.hands[1].stick_click=true;

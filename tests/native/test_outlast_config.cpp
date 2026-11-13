@@ -7,6 +7,9 @@ int main() {
         auto parse=[](const std::string& text) {std::istringstream input(text);return parse_outlast_config(input);};
         auto require=[](bool value) {if (!value) throw std::runtime_error("Configuration regression");};
         require(!parse("").physical_camcorder);
+        require(!parse("").comfort.hit_distortion);
+        require(parse("[vr]\nhit_distortion=true\n").comfort.hit_distortion);
+        require(!parse("[vr]\nhit_distortion=false\n").comfort.hit_distortion);
         require(parse("").instant_pickups && !parse("[experimental]\ninstant_pickups=false\n").instant_pickups);
         require(parse("[experimental]\nphysical_camcorder=true\ninstant_pickups=true\n"
             "[vr]\nleft_handed=true\n").comfort.left_handed);
@@ -29,6 +32,8 @@ int main() {
                 "[vr]\nworld_scale=0","[vr]\nworld_scale=1.0junk",
                 "[vr]\nvignette_strength=2","[vr]\nseated=yes","[vr]\nmovement_reference=wrong",
                 "[vr]\ntoggle_sprint=yes","[experimental]\ninstant_pickups=yes",
+                "[vr]\nhit_distortion=yes","[vr]\nhit_distortion=",
+                "[vr]\nhit_distortion=true\nhit_distortion=false",
                 "[experimental]\ninstant_pickups=true\ninstant_pickups=false"}) {
             bool rejected=false;
             try {parse(invalid);} catch (const std::invalid_argument&) {rejected=true;}

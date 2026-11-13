@@ -47,6 +47,9 @@ std::array<unsigned char,0x450> native_effects{};
 std::array<unsigned char,0xa90> native_controller{};
 void* native_engine_pointer=native_engine.data();
 std::array<UINT,3> native_night_lights{0,0,1};
+std::array<std::array<unsigned char,0x280>,3> native_light_components{};
+std::array<unsigned char,0xa80> recreated_engine{};
+unsigned light_ticks=0,light_pose_calls=0;
 std::array<UINT,4> native_effect_calls{};
 DWORD native_effect_thread=0;
 using MoviePlaying=INT(WINAPI*)(void*,const wchar_t*);
@@ -157,6 +160,10 @@ public:
 };
 NATIVE void WINAPI input_tick_stub(void*,float) {
     asm volatile("nop;nop;nop;nop;nop");
+    if (native_engine_pointer) {
+        UINT flags=0;std::memcpy(&flags,static_cast<BYTE*>(native_engine_pointer)+0x3f8,4);
+        require(flags==0xa5a50000,"VR pacing retained smoothing or overwrote unrelated engine flags");
+    }
     UINT connected=0;std::memcpy(&connected,native_gamepads.data()+0x1f0,4);
     require(connected==1,"Virtual controller failed native cached-disconnection startup gate");
     observed_joystick_focus=joystick_focus_site(focus_viewport.data());
@@ -214,11 +221,35 @@ void WINAPI camera_effect_stub(void* effects) {
     write(effects,0x3b8,BYTE(1));++native_effect_calls[2];
 }
 void WINAPI night_light_stub(void* light,UINT active) {
-    require(GetCurrentThreadId()==native_effect_thread &&
-        std::any_of(native_night_lights.begin(),native_night_lights.end(),
-            [&](const UINT& candidate) {return &candidate==light;}),
+    const auto found=std::find_if(native_light_components.begin(),native_light_components.end(),
+        [&](const auto& candidate) {return candidate.data()==light;});
+    require(GetCurrentThreadId()==native_effect_thread && found!=native_light_components.end(),
         "Native night vision changed light ownership or gameplay thread");
-    *static_cast<UINT*>(light)=active;++native_effect_calls[3];
+    native_night_lights[found-native_light_components.begin()]=active;++native_effect_calls[3];
+}
+NATIVE void WINAPI light_tick_stub(void* hero,float elapsed) {
+    asm volatile("nop;nop;nop;nop;nop");
+    require(hero==camera_hero.data() && elapsed==.015f,"Native light tick ABI changed");
+    ++light_ticks;
+    write(native_light_components[0].data(),0x210,Vec3{-700,-800,-900});
+}
+float* WINAPI actor_matrix_stub(void* hero,float* output) {
+    require(hero==camera_hero.data() && GetCurrentThreadId()==native_effect_thread,
+        "Headset light matrix requested outside its native owner thread");
+    INT yaw=0;Vec3 root{};
+    std::memcpy(&yaw,static_cast<BYTE*>(hero)+0x90,4);
+    std::memcpy(&root,static_cast<BYTE*>(hero)+0x80,sizeof(root));
+    const float radians=float(double(yaw)*6.2831853071795864769/65536);
+    const Matrix4 matrix{std::cos(radians),std::sin(radians),0,0,
+        -std::sin(radians),std::cos(radians),0,0,0,0,1,0,root.x,root.y,root.z,1};
+    std::copy(matrix.begin(),matrix.end(),output);
+    return output;
+}
+void WINAPI light_rotation_stub(void* light,const INT* rotation) {
+    require(light==native_light_components[0].data() && GetCurrentThreadId()==native_effect_thread,
+        "Headset pose changed a foreign native light or gameplay thread");
+    write(light,0x26c,std::array<INT,3>{rotation[0],rotation[1],rotation[2]});
+    ++light_pose_calls;
 }
 NATIVE int WINAPI sphere_stub(const void*,const float*,const float*) {asm volatile("nop;nop;nop;nop;nop");return 0;}
 NATIVE int WINAPI sphere_inside_stub(const void*,const float*,const float*,int* inside) {asm volatile("nop;nop;nop;nop;nop");*inside=0;return 0;}
@@ -585,7 +616,8 @@ int main(int argc,char** argv) {
             mode=="--reset-retry" || mode=="--flat-wrap" || mode=="--snap-recovery" ||
             mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
             mode=="--fault-loading-blackout" || mode=="--material-constants" ||
-            mode=="--fault-material-constants")),
+            mode=="--fault-material-constants" || mode=="--fault-headset-light" ||
+            mode=="--fault-frame-pacing")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
@@ -660,6 +692,12 @@ int main(int argc,char** argv) {
         config.bindings.normal_effect=&normal_effect_stub;
         config.bindings.camera_effect=&camera_effect_stub;
         config.bindings.night_light=&night_light_stub;
+        if (mode!="--fault-frame-pacing") config.bindings.frame_rate_engine=&native_engine_pointer;
+        if (mode!="--fault-headset-light") {
+            config.bindings.night_light_tick=&light_tick_stub;
+            config.bindings.actor_matrix=&actor_matrix_stub;
+            config.bindings.light_rotation=&light_rotation_stub;
+        }
         native_movie_vtable[8]=&movie_playing_stub;
         config.bindings.movie_player=&native_movie_player;
         config.bindings.input_tick=&input_tick_stub;
@@ -678,9 +716,11 @@ int main(int argc,char** argv) {
         write(camera_hero.data(),0x2bbc,native_controller.data());
         write(native_controller.data(),0xa84,UINT(2));
         write(native_engine.data(),0xa74,native_effects.data());
+        write(native_engine.data(),0x3f8,UINT(0xa5a50200));
+        recreated_engine=native_engine;
         write(native_effects.data(),0x3b4,UINT(0x5a5a1234));
         for (unsigned light=0;light<native_night_lights.size();++light)
-            write(camera_hero.data(),0x2d40+light*sizeof(void*),&native_night_lights[light]);
+            write(camera_hero.data(),0x2d40+light*sizeof(void*),native_light_components[light].data());
         native_effect_thread=GetCurrentThreadId();
         write(camera_mesh.data(),0x78,camera_hero.data());
         write(lean_node.data(),0x84,camera_mesh.data());
@@ -710,7 +750,11 @@ int main(int argc,char** argv) {
         require(joystick_focus_site(focus_viewport.data())==1,
             "Joystick focus hook changed an originally focused native viewport");
         actual_viewport_focus=0;
+        native_engine_pointer=nullptr;
         input_tick_stub(nullptr,0);
+        UINT deferred_flags=0;std::memcpy(&deferred_flags,native_engine.data()+0x3f8,4);
+        require(deferred_flags==0xa5a50200,"Missing engine changed pacing state during startup");
+        native_engine_pointer=native_engine.data();
         require(observed_gamepad.Gamepad.wButtons==0 && observed_gamepad.Gamepad.sThumbLX==0,
             "Native virtual controller was not neutral before first XR frame");
         motion_polls=0;
@@ -773,6 +817,7 @@ int main(int argc,char** argv) {
         BYTE resumed_effect_mode=0;
         unsigned scripted_effect_checks=0;
         unsigned loading_mirror_checks=0;
+        bool head_light_checked=false;
         Com<IDirect3DTexture9> flat_texture,offscreen_atlas;
         Com<IDirect3DSurface9> upload_source,flat_readback;
         for (unsigned f=0;f<20;++f) {
@@ -1062,13 +1107,48 @@ int main(int argc,char** argv) {
                     std::abs(floor.standing_reference_m-(ready?1.7f:0.f))<.0001f,
                     "Actual DLL latched cached/zero floor height or recalibrated standing height during crouch");
             }
+            if (f==11) native_engine_pointer=recreated_engine.data();
             input_tick_stub(nullptr,.015f);
+            native_engine_pointer=native_engine.data();
+            const auto poses_before=light_pose_calls,ticks_before=light_ticks;
+            light_tick_stub(camera_hero.data(),.015f);
+            require(light_ticks==ticks_before+1,"Headset light replayed native battery/light animation");
+            if (light_pose_calls!=poses_before && mode.empty() && !head_light_checked) {
+                Vec3 local{};
+                std::memcpy(&local,native_light_components[0].data()+0x210,sizeof(local));
+                require(std::abs(local.x-(mock.frame*.001f-.001f)*100)<.001f &&
+                    std::abs(local.y-(mock.frame*.01f-.01f)*100)<.001f && std::abs(local.z)<.001f,
+                    "Actual production light did not follow the rendered headset midpoint");
+                write(camera_hero.data(),0x80,Vec3{100,50,20});
+                write(camera_hero.data(),0x90,INT(16384));
+                light_tick_stub(camera_hero.data(),.015f);
+                Vec3 rebased{};
+                std::memcpy(&rebased,native_light_components[0].data()+0x210,sizeof(rebased));
+                require(std::abs(local.x-rebased.x)<.001f && std::abs(local.y-rebased.y)<.001f &&
+                    std::abs(local.z-rebased.z)<.001f,"Headset light did not rebase with the live hero root/yaw");
+                write(camera_hero.data(),0x80,Vec3{});
+                write(camera_hero.data(),0x90,INT(0));
+                for (const BYTE effect:{BYTE(0),BYTE(1),BYTE(3),BYTE(4),BYTE(255)}) {
+                    native_effects[0x3b8]=effect;
+                    const auto calls=light_pose_calls;
+                    light_tick_stub(camera_hero.data(),.015f);
+                    require(light_pose_calls==calls,"Headset light overrode native/scripted effect ownership");
+                }
+                native_effects[0x3b8]=2;
+                const auto calls=light_pose_calls;
+                Sleep(270);
+                light_tick_stub(camera_hero.data(),.015f);
+                require(light_pose_calls==calls,"Headset light consumed a stale render pose");
+                head_light_checked=true;
+            }
             XINPUT_VIBRATION vibration{32768,65535};
             require(gamepad_vibration_stub(0,&vibration)==ERROR_SUCCESS,
                 "Native rumble did not acknowledge virtual controller zero");
             require(gamepad_vibration_stub(1,&vibration)==ERROR_SUCCESS,
                 "Native rumble changed an unrelated physical controller");
             const bool active=(f+1)%5!=0 && (input_chords || (f+1)%3!=0);
+            if (!active)
+                require(light_pose_calls==poses_before,"Headset light continued after focus or frame tracking loss");
             require(bool(observed_joystick_focus)==active,
                 "XR-focused joystick polling remained tied to desktop keyboard focus");
             require(joystick_focus_site(focus_viewport.data())==0,
@@ -1205,6 +1285,12 @@ int main(int argc,char** argv) {
         require(FreeLibrary(dll)!=0,"Cannot unload integrated DLL");dll=nullptr;
         for (HANDLE event:{render_entered,present_requested,present_finished})
             if (event) require(CloseHandle(event)!=0,"Cannot release an overlap barrier");
+        if (mode.empty() || mode=="--fault-headset-light")
+            require(head_light_checked,"Production headset light correction was never exercised");
+        if (head_light_checked)
+            std::cout<<"PASS: headset_night_light_midpoint; live_root_yaw_rebased; original_tick_once; "
+                <<"scripted_modes_and_stale_pose_preserved; focus_tracking_loss_deferred\n";
+        std::cout<<"PASS: native_smoothing_disabled; unrelated_flags_preserved; absent_and_recreated_engine_checked\n";
         std::cout<<"PASS: integrated production DLL; native_frames=20; XR_projections=16; checked_eye_pixels=2097152; "
             <<"geometry_draws="<<draws<<"; all_four_draw_families; real_retail_replay_consumed="<<replays
             <<"; native_owned_culls="<<counts.owned_culls<<"; max_disparity_error_px="<<mock.maximum_disparity_error
@@ -1245,7 +1331,7 @@ int main(int argc,char** argv) {
         geometry_declaration.reset();replay_declaration.reset();original_vertex.reset();original_pixel.reset();
         integrated_device.reset();
         factory.reset();
-        if (shutdown) shutdown(nullptr);
+        if (dll && shutdown) shutdown(nullptr);
         native.reset();
         if (dll) FreeLibrary(dll);
         return 1;
