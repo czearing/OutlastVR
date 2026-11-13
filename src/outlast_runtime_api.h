@@ -69,11 +69,12 @@ struct RuntimeBindings {
     OutlastNightEffect night_effect=nullptr;
     OutlastCameraEffect normal_effect=nullptr,camera_effect=nullptr;
     OutlastNightLight night_light=nullptr;
+    void** movie_player=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=12;
+    UINT version=13;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};

@@ -65,6 +65,8 @@ struct Mock {
     bool comfort_seated=false;
     bool snap_test=false;
     bool flat_test=false,flat_frame=false,flat_after_world=false;
+    bool loading_blackout_frame=false;
+    UINT loading_blackout_pixels=0;
     bool ui=false,ui_scissor=false;
     bool upright_camera=false;
     XrVector3f native_camera_offset_m{};
@@ -615,7 +617,10 @@ bool inspect_gpu_eyes() {
                 DWORD pixel;
                 std::memcpy(&pixel, static_cast<const char*>(pointer) + footprints[eye].Offset +
                             y * footprints[eye].Footprint.RowPitch + x * 4, 4);
-                if (mock.geometry) {
+                if (mock.loading_blackout_frame) {
+                    valid=valid && pixel==0xff000000;
+                    ++mock.loading_blackout_pixels;
+                } else if (mock.geometry) {
                     const auto color = pixel & 0xffffff;
                     const int group = color == 0xff0000 ? 0 : color == 0x00ff00 ? 1 : -1;
                     if (group >= 0) {
@@ -643,8 +648,10 @@ bool inspect_gpu_eyes() {
             }
     D3D12_RANGE written{0, 0};
     readback->Unmap(0, &written);
+    if (mock.loading_blackout_frame && !valid)
+        std::cerr<<"Compositor loading blackout contains visible or nonopaque pixels\n";
     if (mock.geometry) {
-        for (UINT group = 0; group < 2; ++group) {
+        if (!mock.loading_blackout_frame) for (UINT group = 0; group < 2; ++group) {
             if (counts[0][group] < 100 || counts[1][group] < 100) {
                 std::cerr<<"Compositor geometry coverage failed: group="<<group
                     <<"; left="<<counts[0][group]<<"; right="<<counts[1][group]<<'\n';
@@ -702,8 +709,12 @@ bool inspect_gpu_eyes() {
             if (error>1) std::cerr<<"Compositor disparity failed: group="<<group
                 <<"; actual="<<disparity<<"; expected="<<expected<<'\n';
         }
-        const unsigned expected_draws=mock.flat_after_world?2u:1u;
-        const unsigned expected_instances=mock.expected_instances+(mock.flat_after_world?2u:0u);
+        const bool native_blackout_draw=!mock.flat_frame || mock.flat_after_world;
+        const unsigned expected_draws=mock.loading_blackout_frame?(native_blackout_draw?1u:0u):
+            mock.flat_after_world?2u:1u;
+        const unsigned expected_instances=mock.loading_blackout_frame?
+            (native_blackout_draw?mock.expected_instances:0u):
+            mock.expected_instances+(mock.flat_after_world?2u:0u);
         valid = valid && mock.counter && mock.counter->indexed_calls == expected_draws &&
                 mock.counter->plain_calls == 0 && mock.counter->instances == expected_instances;
         if (mock.counter) {

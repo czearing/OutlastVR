@@ -6,6 +6,7 @@
 #include <d3dcompiler.h>
 #include <thread>
 #include <exception>
+#include <cwchar>
 
 namespace {
 using Initialize=DWORD(WINAPI*)(const RuntimeTestConfiguration*);
@@ -47,6 +48,12 @@ void* native_engine_pointer=native_engine.data();
 std::array<UINT,3> native_night_lights{0,0,1};
 std::array<UINT,4> native_effect_calls{};
 DWORD native_effect_thread=0;
+using MoviePlaying=INT(WINAPI*)(void*,const wchar_t*);
+std::array<MoviePlaying,9> native_movie_vtable{};
+struct {MoviePlaying* vtable;} native_movie_object{native_movie_vtable.data()};
+void* native_movie_player=&native_movie_object;
+const wchar_t* native_movie_name=L"Intro";
+unsigned native_movie_queries=0;
 std::array<float,6> camera_base_pose{};
 float native_lean_weight=0;
 std::array<unsigned char,500*4> native_gamepads{};
@@ -92,6 +99,12 @@ template<class T> T exported(HMODULE dll,const char* name) {
     require(result!=nullptr,std::string("DLL export is missing: ")+name);return result;
 }
 #define NATIVE __attribute__((noinline,noclone,noipa))
+NATIVE INT WINAPI movie_playing_stub(void* player,const wchar_t* name) {
+    require(player==&native_movie_object && name && std::wcscmp(name,L"LoadingScreen")==0,
+        "Production loading query changed native movie identity, slot or name ABI");
+    ++native_movie_queries;
+    return std::wcscmp(native_movie_name,name)==0?1:0;
+}
 NATIVE DWORD WINAPI gamepad_state_stub(DWORD index,XINPUT_STATE* output) {
     asm volatile("nop;nop;nop;nop;nop");
     if (index==1 && output) {
@@ -561,17 +574,21 @@ int main(int argc,char** argv) {
             mode=="--comfort-fault-turn" || mode=="--snap" || mode=="--fault-snap" ||
             mode=="--flat-transitions" || mode=="--flat-upload" || mode=="--fault-flat-mono" ||
             mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery" ||
-            mode=="--reset-retry" || mode=="--flat-wrap" || mode=="--snap-recovery")),
+            mode=="--reset-retry" || mode=="--flat-wrap" || mode=="--snap-recovery" ||
+            mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
+            mode=="--fault-loading-blackout")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
         fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono" || fault_flat_mono;
-        const bool flat_upload=mode=="--flat-upload";
+        const bool loading_blackout=mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
+            mode=="--fault-loading-blackout";
+        const bool flat_upload=mode=="--flat-upload" || mode=="--loading-upload-blackout";
         const bool input_chords=mode=="--input-chords";
         const bool input_recovery=mode=="--input-recovery";
         const bool reset_retry=mode=="--reset-retry";
         const bool flat_wrap=mode=="--flat-wrap";
-        mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono || flat_wrap;
+        mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono || flat_wrap || loading_blackout;
         mock.dynamic_ipd=mode=="--ipd-cycle";
         thread_handoff=mode=="--thread-handoff" || mode=="--ui-scaleform-handoff";
         thread_overlap=mode=="--thread-overlap";
@@ -633,6 +650,8 @@ int main(int argc,char** argv) {
         config.bindings.normal_effect=&normal_effect_stub;
         config.bindings.camera_effect=&camera_effect_stub;
         config.bindings.night_light=&night_light_stub;
+        native_movie_vtable[8]=&movie_playing_stub;
+        config.bindings.movie_player=&native_movie_player;
         config.bindings.input_tick=&input_tick_stub;
         config.bindings.gamepad_state=&gamepad_state_stub;
         config.bindings.gamepad_vibration=&gamepad_vibration_stub;
@@ -743,10 +762,15 @@ int main(int argc,char** argv) {
         unsigned crouch_edges=0;
         BYTE resumed_effect_mode=0;
         unsigned scripted_effect_checks=0;
+        unsigned loading_mirror_checks=0;
         Com<IDirect3DTexture9> flat_texture,offscreen_atlas;
         Com<IDirect3DSurface9> upload_source,flat_readback;
         for (unsigned f=0;f<20;++f) {
             mock.flat_frame=mock.flat_test && (f%5==1 || f%5==2);
+            mock.loading_blackout_frame=loading_blackout && f%5>=1 && (f/5)%2==0;
+            native_movie_name=mock.loading_blackout_frame && mode!="--fault-loading-blackout"?
+                L"LoadingScreen":L"Intro";
+            native_movie_player=loading_blackout && f==6?nullptr:&native_movie_object;
             const bool flat_only=mock.flat_test && f%5==1;
             mock.flat_after_world=mock.flat_frame && !flat_only;
             if (snap_mode) motion_mock::fake.fixture_turn.x=f==1?1.f:0.f;
@@ -963,6 +987,26 @@ int main(int argc,char** argv) {
                 }
                 gpu_check(integrated_device->Present(nullptr,nullptr,nullptr,nullptr),
                     "Present through integrated XR submission");
+                if (mock.loading_blackout_frame) {
+                    if (!flat_readback.get())
+                        gpu_check(integrated_device->CreateOffscreenPlainSurface(512,256,D3DFMT_A8R8G8B8,
+                            D3DPOOL_SYSTEMMEM,flat_readback.put(),nullptr),"Create loading-blackout atlas readback");
+                    Com<IDirect3DSurface9> image;
+                    gpu_check(integrated_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,image.put()),
+                        "Get loading-blackout desktop-mirror source");
+                    gpu_check(integrated_device->GetRenderTargetData(image.get(),flat_readback.get()),
+                        "Read complete loading-blackout atlas after presentation");
+                    D3DLOCKED_RECT copied{};
+                    gpu_check(flat_readback->LockRect(&copied,nullptr,D3DLOCK_READONLY),
+                        "Lock loading-blackout atlas");
+                    bool opaque_black=true;
+                    for (UINT y=0;y<256;++y) for (UINT x=0;x<512;++x)
+                        opaque_black &= reinterpret_cast<const DWORD*>(
+                            static_cast<const char*>(copied.pBits)+y*copied.Pitch)[x]==0xff000000;
+                    gpu_check(flat_readback->UnlockRect(),"Unlock loading-blackout atlas");
+                    require(opaque_black,"Loading visuals leaked into the native desktop-mirror source");
+                    ++loading_mirror_checks;
+                }
                 if (flat_wrap) {
                     DWORD restored=0;
                     gpu_check(integrated_device->GetRenderState(D3DRS_WRAP0,&restored),"Inspect native frame wrapping");
@@ -1091,6 +1135,9 @@ int main(int argc,char** argv) {
         std::cout<<"PASS: native_motion_polls=20; XR_actions_to_game_input; cached_presence_seeded; "
             <<"focused_axes_buttons; unavailable_body_use_suppressed; focus_and_skipped_frames_neutral; unrelated_pad_preserved\n";
         RuntimeStatistics counts{};require(statistics(&counts)!=FALSE,"Cannot read integrated mod counters");
+        if (loading_blackout)
+            require(native_movie_queries==19 && mock.loading_blackout_pixels==786432 && loading_mirror_checks==8,
+                "Loading blackout missed native named-movie queries, opaque pixels or automatic recovery");
         // Regular/replay masks, additionally split by menu clipping, each rebuilt after reset.
         const unsigned expected_state_allocations=mock.ui?8u:4u;
         const unsigned native_scenes=mock.flat_test?16u:20u;
@@ -1104,8 +1151,8 @@ int main(int argc,char** argv) {
             "Gameplay or flat-only frame used the wrong XR presentation path");
         require(mock.frame==20 && mock.submitted==16 && mock.blank==4 && mock.pixels==2097152 &&
             !mock.failed && counts.frames==20 && counts.submitted==16 &&
-            counts.geometry_draws==(mock.flat_test?24u:20u) &&
-            counts.world_panel_draws==(mock.flat_test?8u:0u) &&
+            counts.geometry_draws==(loading_blackout?20u:mock.flat_test?24u:20u) &&
+            counts.world_panel_draws==(loading_blackout?4u:mock.flat_test?8u:0u) &&
             counts.tracked_views==((mock.ui && !ui_owned)?0u:tracked_scenes) &&
             counts.owned_culls==(mock.ui?0u:tracked_scenes*6) && cull_checks==(mock.ui?0u:tracked_scenes*8) &&
             counts.crosshair_updates==native_scenes && crosshair_updates==native_scenes &&
@@ -1159,8 +1206,11 @@ int main(int argc,char** argv) {
         if (mock.ui) std::cout<<"; ui_classified_draws="<<counts.ui_draws<<"; ui_plane_draws="<<counts.ui_plane_draws
             <<"; ui_ray_checked_pixels="<<mock.ui_checked
             <<"; asymmetric_canted_FOV; yaw_pitch_roll; native_canvas_scissor_and_subviewport";
-        if (mock.flat_test) std::cout<<"; flat_stereo_panels=8; world_flat_world_cycles=4; "
+        if (mock.flat_test) std::cout<<"; flat_stereo_panels="<<(loading_blackout?4:8)<<"; world_flat_world_cycles=4; "
             <<"flat_only_and_late_fullscreen_mono_copy; independent_per_eye_flat_pixel_oracle";
+        if (loading_blackout) std::cout<<"; loading_blackout_frames=6; opaque_black_eye_pixels=786432; "
+            <<"native_loading_name_only; other_movies_visible; world_recovered_after_reset; "
+            <<"native_loading_presents=8; direct_and_panel_paths; skipped_frame_mirror_black";
         if (flat_upload) std::cout<<"; UpdateSurface_full_and_partial_two_half_reference";
         if (mock.dynamic_ipd) std::cout<<"; runtime_ipd_changes_mm=64,78,50,72; current_eye_layers_and_disparity";
         if (ui_scaleform) std::cout<<"; native_scaleform_scope";

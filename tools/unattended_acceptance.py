@@ -28,6 +28,7 @@ REQUIRED_TESTS = {
     "test_integrated_mod", "test_integrated_reset_retry", "test_integrated_flat_wrap",
     "test_integrated_thread_overlap", "test_integrated_ui_scaleform_handoff",
     "test_integrated_camera_bob", "test_integrated_camera_handoff", "test_integrated_floor_startup",
+    "test_integrated_loading_blackout", "test_integrated_loading_upload_blackout",
     "python_regressions",
 }
 DLL_MODES = (
@@ -36,6 +37,7 @@ DLL_MODES = (
     "--floor-startup", "--comfort", "--snap", "--snap-recovery", "--ipd-cycle",
     "--input-chords", "--input-recovery", "--reset-retry",
     "--flat-transitions", "--flat-upload", "--flat-wrap",
+    "--loading-blackout", "--loading-upload-blackout",
 )
 DLL_REJECTIONS = {
     "--fault-dual": "Compositor physical draw count failed: indexed=2; plain=0; instances=4",
@@ -44,6 +46,7 @@ DLL_REJECTIONS = {
     "--fault-flat-mono": "Compositor projected ray alignment failed:",
     "--fault-camera-bob": "Compositor upright camera alignment failed:",
     "--fault-camera-handoff": "Compositor upright camera alignment failed:",
+    "--fault-loading-blackout": "Compositor loading blackout contains visible or nonopaque pixels",
     "--fault-camera-tilt": "Compositor upright camera alignment failed:",
     "--comfort-fault-scale": "Compositor disparity failed:",
     "--fault-snap": "Compositor projected ray alignment failed:",
@@ -231,6 +234,12 @@ def main(argv=None):
                     markers += [
                         "completed_camera_pose_matches=12; native_camera_handoffs=2; unlinked_views=4; "
                         "native_origins_preserved; gameplay_stabilization_resumed",
+                    ]
+                if mode in ("--loading-blackout", "--loading-upload-blackout"):
+                    markers += [
+                        "loading_blackout_frames=6; opaque_black_eye_pixels=786432; native_loading_name_only; "
+                        "other_movies_visible; world_recovered_after_reset; native_loading_presents=8; "
+                        "direct_and_panel_paths; skipped_frame_mirror_black",
                     ]
                 run(f"dll-{cycle:04}-{name}", [paths["integrated"], module, retail] + ([mode] if mode else []),
                     markers)

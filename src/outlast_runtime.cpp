@@ -206,6 +206,8 @@ class Runtime {
     MenuMovieEntry menu_movie_=nullptr;
     bool menu_seen_=false;
     bool present_panel_=false;
+    void** native_movie_player_=nullptr;
+    bool loading_movie_active_=false;
     bool last_present_panel_=false;
     WorldPanel panel_anchor_;
     std::atomic<bool> native_interactive_menu_{false};
@@ -3784,6 +3786,12 @@ class Runtime {
                     data,(std::size_t(minimum)+vertices)*stride,stride,views);});
             r.submitted(result);return HRESULT(result.operation_status);});
     }
+    bool loading_movie_playing() const {
+        auto* player=native_movie_player_?*native_movie_player_:nullptr;
+        using MoviePlaying=INT(WINAPI*)(void*,const wchar_t*);
+        // Use the retail reload path's named query, not generic movie playback.
+        return player && entry<MoviePlaying>(player,8)(player,L"LoadingScreen")==1;
+    }
     static HRESULT WINAPI present(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND window,const RGNDATA* dirty) {
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);
             if (internal_depth || d!=r.device_.get()) return r.original<Present>(d,17)(d,a,b,window,dirty);
@@ -3820,6 +3828,11 @@ class Runtime {
                 return r.original<Present>(d,17)(d,a,b,window,dirty);
             }
             gpu_check(cooperative,"Read VR presentation recovery state");
+            const bool loading=r.loading_movie_playing();
+            if (loading!=r.loading_movie_active_) {
+                log(loading?"Native loading movie active":"Native loading movie finished");
+                r.loading_movie_active_=loading;
+            }
             if (r.camcorder_probe_) r.camcorder_probe_->sample(*d,UINT(r.stats_.frames));
             if (r.camcorder_capture_) {
                 r.camcorder_capture_->advance_frame(UINT(r.stats_.frames));
@@ -3828,6 +3841,9 @@ class Runtime {
                 if (r.camcorder_resolve_probe_) r.camcorder_resolve_probe_->sampled(r.camcorder_capture_->sampled());
             }
             if (!r.frame_open_) r.begin_frame();
+            if (loading)
+                gpu_check(d->ColorFill(r.final_surface_.get(),nullptr,0xff000000),
+                    "Black out the native loading movie in both eyes and desktop mirror");
             if (r.frame_open_) {
                 if (r.present_panel_!=r.last_present_panel_) {
                     if (r.present_panel_) r.panel_anchor_.reset();
@@ -3835,8 +3851,8 @@ class Runtime {
                         "Native gameplay: tracked single-pass world");
                     r.last_present_panel_=r.present_panel_;
                 }
-                r.compose_camcorder();
-                if (!r.present_panel_ && !r.menu_overlay_ && r.vignette_strength_>0) {
+                if (!loading) r.compose_camcorder();
+                if (!loading && !r.present_panel_ && !r.menu_overlay_ && r.vignette_strength_>0) {
                     if (!r.comfort_filter_)
                         r.comfort_filter_=std::make_unique<D3D9ComfortFilter>(*d);
                     r.comfort_filter_->draw(*r.final_surface_.get(),r.vignette_strength_);
@@ -3847,7 +3863,12 @@ class Runtime {
                         D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,r.submission_.put(),nullptr),"Create exact XR output extent");
                     gpu_check(r.submission_->GetSurfaceLevel(0,r.submission_surface_.put()),"Get exact XR output surface");
                 }
-                if (r.present_panel_) {
+                if (loading) {
+                    if (!direct)
+                        gpu_check(d->ColorFill(r.submission_surface_.get(),nullptr,0xff000000),
+                            "Submit opaque black throughout native loading playback");
+                    r.controller_menu_pointer(false,nullptr);
+                } else if (r.present_panel_) {
                     if (!r.panel_renderer_) r.panel_renderer_=std::make_unique<D3D9WorldPanel>(*d);
                     r.panel_renderer_->draw(*r.final_.get(),*r.submission_surface_.get(),
                         r.xr().width(),r.xr().height(),
@@ -3930,6 +3951,7 @@ class Runtime {
             return result;});
     }
     void bind_native(const RuntimeBindings& bindings) {
+        native_movie_player_=bindings.movie_player;
         if (bindings.night_vision_engine || bindings.menu_state || bindings.night_effect ||
             bindings.normal_effect || bindings.camera_effect || bindings.night_light) {
             if (!bindings.night_vision_engine || !bindings.menu_state || !bindings.night_effect ||
@@ -4060,7 +4082,7 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=12 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=13 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;
@@ -4477,6 +4499,9 @@ public:
                     b.gamepad_count=reinterpret_cast<INT*>(base_+0x201e318);
                 }
                 menu_state_=retail_entry<MenuStateEntry>(image,0xd14e90);
+                if (module_extent_<0x201ebc8)
+                    throw std::runtime_error("Native movie-player global lies outside the exact retail image");
+                b.movie_player=reinterpret_cast<void**>(base_+0x201ebc0);
                 bind_native(b);
                 if (motion_enabled_ || probe_skeleton_.is_open()) {
                     bone_name_=retail_entry<BoneNameEntry>(image,0xcbc70);

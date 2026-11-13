@@ -122,7 +122,8 @@ if(OLVR_GPU_TESTS)
             set_tests_properties(test_integrated_flat_${mode} PROPERTIES LABELS "gpu;retail" RUN_SERIAL TRUE TIMEOUT 120)
         endforeach()
         foreach(mode IN ITEMS thread-handoff thread-overlap ui ui-in-renderer
-                ui-scaleform ui-scaleform-handoff camera-tilt camera-bob camera-handoff floor-startup)
+                ui-scaleform ui-scaleform-handoff camera-tilt camera-bob camera-handoff floor-startup
+                loading-blackout loading-upload-blackout)
             string(REPLACE "-" "_" test_mode "${mode}")
             add_test(NAME test_integrated_${test_mode} COMMAND test_integrated_mod
                 "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --${mode})

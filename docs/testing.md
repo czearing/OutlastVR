@@ -44,6 +44,8 @@ approval. Mock runtimes and retained captures cover only the scenarios exercised
   verification, normal Steam launch, updating and uninstalling.
 - Check both eyes during videos, loading, gameplay, menus, notes, cutscenes,
   death/restart and save/load. Check text placement and menu-pointer alignment.
+- During checkpoint reloads, check that both eyes stay black with no loading
+  artwork or pointer, then return to gameplay. Menus and videos must remain visible.
 - Check height, scale and controls after recentering, focus loss, headset
   removal and controller reconnection. Include seated and left-handed modes.
 - Pick up notes, folders and batteries with both pickup settings. Confirm each
