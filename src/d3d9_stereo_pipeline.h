@@ -95,6 +95,7 @@ private:
     std::unique_ptr<StereoReconstructionCache> reconstruction_cache_;
     std::vector<float> view_records_;
     std::vector<float> uploaded_view_records_;
+    std::vector<float> pixel_constant_upload_;
     std::vector<std::array<float,16>> original_uniforms_;
     std::vector<std::array<float,16>> cached_original_uniforms_;
     StereoViewConstants cached_views_{};

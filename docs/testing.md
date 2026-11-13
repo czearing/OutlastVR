@@ -37,6 +37,8 @@ logs together.
 Crashes, timeouts and missing dependencies do not count as passing negative
 controls. `automated_passed` records automated results, not headset or campaign
 approval. Mock runtimes and retained captures cover only the scenarios exercised.
+The transient-effect fixture checks synthetic radial distortion, two-axis offsets,
+flash tint and recovery. It does not establish the retail hit effect's appearance.
 
 ## Headset playtest
 
@@ -56,6 +58,8 @@ approval. Mock runtimes and retained captures cover only the scenarios exercised
   Check tracking recovery and that rendered shadows follow the tracked hands.
 - Compare night vision with the original game in the same scene. Check
   illumination, color, glass, transparent materials and particles in both eyes.
+- Take repeated hits with night vision on and off. Check flash, distortion,
+  camera motion and recovery in both eyes, including a hit followed by death/reload.
 - Exercise each available headset/controller/runtime combination. Include
   hybrid-GPU laptops where available.
 - Run extended sessions with repeated save/load cycles. Record headset frame

@@ -676,15 +676,27 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
     gpu_check(device_->SetStreamSource(eye_stream, eyes_.get(), 0, sizeof(float)), "Bind paired eye stream");
     gpu_check(device_->SetVertexShader(vertex_.get()), "Bind stereo vertex shader");
     gpu_check(device_->SetPixelShader(pixel_.get()), "Bind stereo pixel shader");
+    pixel_constant_upload_.resize(shaders_.pixel_constant_rows.size()*8);
+    UINT constant_start=0,constant_count=0;
+    const auto flush_constants=[&] {
+        if (constant_count)
+            gpu_check(device_->SetPixelShaderConstantF(constant_start,pixel_constant_upload_.data(),constant_count),
+                "Bind contiguous per-eye material constants without texture reads");
+        constant_count=0;
+    };
+    const auto append_constant=[&](UINT index,const float* value) {
+        if (constant_count && index!=constant_start+constant_count) flush_constants();
+        if (!constant_count) constant_start=index;
+        std::copy_n(value,4,pixel_constant_upload_.data()+constant_count*4);
+        ++constant_count;
+    };
     for (const auto& row:shaders_.pixel_constant_rows) {
         if (row.texture_row>=shaders_.view_texture_width || row.left>=224 || row.right>=224)
-            throw std::invalid_argument("Invalid sampler-saturated material constant binding");
-        gpu_check(device_->SetPixelShaderConstantF(row.left,records.data()+row.texture_row*4,1),
-            "Bind left-eye material constant without consuming a texture sampler");
-        gpu_check(device_->SetPixelShaderConstantF(row.right,
-            records.data()+(shaders_.view_texture_width+row.texture_row)*4,1),
-            "Bind right-eye material constant without consuming a texture sampler");
+            throw std::invalid_argument("Invalid per-eye material constant binding");
+        append_constant(row.left,records.data()+row.texture_row*4);
+        append_constant(row.right,records.data()+(shaders_.view_texture_width+row.texture_row)*4);
     }
+    flush_constants();
     std::array<UINT,2> view_samplers{};
     unsigned view_sampler_count=0;
     if (shaders_.vertex_texture) view_samplers[view_sampler_count++]=D3DVERTEXTEXTURESAMPLER0+shaders_.vertex_sampler;

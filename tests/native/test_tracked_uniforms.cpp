@@ -48,14 +48,18 @@ int main(int argc,char** argv) {
         const bool upload_cache=argc==2 && std::string(argv[1])=="--upload-cache";
         const bool cache_invalidation=argc==2 && std::string(argv[1])=="--cache-invalidation";
         const bool declaration_cache=argc==2 && std::string(argv[1])=="--declaration-cache";
-        const bool benchmark=argc==2 && std::string(argv[1])=="--cpu-benchmark";
+        const bool gpu_benchmark=argc==2 && std::string(argv[1])=="--gpu-benchmark";
+        const bool benchmark=gpu_benchmark || (argc==2 && std::string(argv[1])=="--cpu-benchmark");
+        const bool pixel_constants=argc==2 && std::string(argv[1])=="--pixel-constants";
+        const bool register_pressure=argc==2 && std::string(argv[1])=="--pixel-register-pressure";
         const bool index_cache_fault=argc==2 && std::string(argv[1])=="--fault-index-cache-stale";
         const bool index_cache=index_cache_fault || (argc==2 && std::string(argv[1])=="--index-cache");
         const unsigned frames=index_cache?12:6;
         const bool caller_fault=argc==2 && std::string(argv[1])=="--fault-caller-state";
         const bool caller_state=caller_fault || (argc==2 && std::string(argv[1])=="--caller-state");
-        constexpr unsigned benchmark_draws=3000;
+        const unsigned benchmark_draws=gpu_benchmark?64:3000;
         std::vector<double> submission_us(frames);
+        std::vector<double> gpu_us(frames);
         const bool material_fault=argc==2 && std::string(argv[1])=="--fault-material-untracked";
         const bool camera_only_fault=argc==2 && std::string(argv[1])=="--fault-material-camera-only";
         const bool camera_projection=argc==2 && std::string(argv[1])=="--material-camera-only-projection";
@@ -88,10 +92,10 @@ int main(int argc,char** argv) {
         const bool billboard=billboard_fault || billboard_locked || billboard_policy ||
             (argc==2 && std::string(argv[1])=="--billboard-camera");
         if (argc!=1 && !fault && !burst && !native_columns && !context_change && !upload_cache &&
-            !cache_invalidation && !declaration_cache && !benchmark && !index_cache &&
+            !cache_invalidation && !declaration_cache && !benchmark && !index_cache && !pixel_constants && !register_pressure &&
             !material && !motion && !caller_state && !billboard)
             throw std::invalid_argument("Unknown tracked-uniform control");
-        constexpr UINT width=64,height=16;
+        const UINT width=gpu_benchmark?512:64,height=gpu_benchmark?256:16;
         const UINT target_height=burst?height*6:height;
         IsolatedDevice isolated(width*2,target_height);
         auto& device=*isolated.device.get();
@@ -227,7 +231,20 @@ int main(int argc,char** argv) {
         Com<IDirect3DVertexShader9> vertex;
         Com<IDirect3DPixelShader9> pixel;
         gpu_check(device.CreateVertexShader(static_cast<const DWORD*>(vertex_code->GetBufferPointer()),vertex.put()),"Create tracked fixture vertex");
-        gpu_check(device.CreatePixelShader(static_cast<const DWORD*>(pixel_code->GetBufferPointer()),pixel.put()),"Create tracked fixture pixel");
+        const auto* original_pixel=static_cast<const std::uint32_t*>(pixel_code->GetBufferPointer());
+        sm3::Words selected_pixel(original_pixel,original_pixel+pixel_code->GetBufferSize()/4);
+        if (register_pressure) {
+            const auto instructions=sm3::parse(selected_pixel);
+            const auto free=sm3::inspect(instructions).free(2,224);
+            auto [headers,body]=sm3::split(instructions);
+            for (std::size_t index=0;index+8<free.size();++index)
+                sm3::op(headers,81,{sm3::destination(2,free[index]),0,0,0,0});
+            selected_pixel={0xffff0300u};
+            sm3::append(selected_pixel,sm3::canonical(headers));sm3::append(selected_pixel,body);
+            selected_pixel.push_back(65535);
+        }
+        const std::vector<DWORD> selected_code(selected_pixel.begin(),selected_pixel.end());
+        gpu_check(device.CreatePixelShader(selected_code.data(),pixel.put()),"Create tracked fixture pixel");
         gpu_check(device.SetVertexShader(vertex.get()),"Bind original tracked vertex");
         gpu_check(device.SetPixelShader(pixel.get()),"Bind original tracked pixel");
         const D3DVERTEXELEMENT9 elements[]{
@@ -338,6 +355,12 @@ int main(int argc,char** argv) {
         gpu_check(device.SetPixelShaderConstantF(0,parameters,1),"Bind reconstruction fixture dimensions");
         D3D9ShaderVariants variants(device);
         auto& pipeline=variants.current(0,false,false,false,false,!fault && !billboard_fault);
+        if (pixel_constants && (pipeline.diagnostic_binding().pixel_constant_rows.empty() ||
+            pipeline.diagnostic_binding().pixel_view_sampler>=0))
+            throw std::runtime_error("Available pixel constants still use per-pixel camera texture reads");
+        if (register_pressure && (!pipeline.diagnostic_binding().pixel_constant_rows.empty() ||
+            pipeline.diagnostic_binding().pixel_view_sampler<0))
+            throw std::runtime_error("Constant-register pressure did not retain the texture fallback");
         pipeline.set_reconstruction_context(context);
         pipeline.set_camera_directions_view_dependent(!billboard_locked || billboard_lock_fault);
         pipeline.set_native_view_columns(native_columns && !native_fault);
@@ -498,11 +521,24 @@ int main(int argc,char** argv) {
                 gpu_check(device.SetScissorRect(&scissor),"Change caller scissor");
                 caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
             }
+            if (pixel_constants || register_pressure) {
+                if (serial==4) pipeline.release_device_resources();
+                caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
+            }
             if (full_samplers) {
                 if (pipeline.diagnostic_binding().pixel_constant_rows.empty() ||
                     pipeline.diagnostic_binding().pixel_view_sampler>=0)
                     throw std::runtime_error("Sampler-saturated material did not use paired constant rows");
                 caller_before=std::make_unique<TestD3D9StateSnapshot>(device);
+            }
+            Com<IDirect3DQuery9> gpu_start,gpu_end,gpu_frequency,gpu_disjoint;
+            if (gpu_benchmark) {
+                gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMP,gpu_start.put()),"Create benchmark GPU start");
+                gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMP,gpu_end.put()),"Create benchmark GPU end");
+                gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMPFREQ,gpu_frequency.put()),"Create benchmark GPU frequency");
+                gpu_check(device.CreateQuery(D3DQUERYTYPE_TIMESTAMPDISJOINT,gpu_disjoint.put()),"Create benchmark GPU disjoint");
+                gpu_check(gpu_disjoint->Issue(D3DISSUE_BEGIN),"Begin benchmark GPU timing");
+                gpu_check(gpu_start->Issue(D3DISSUE_END),"Start benchmark GPU workload");
             }
             const auto begin=std::chrono::steady_clock::now();
             for (unsigned repeat=0;repeat<(benchmark?benchmark_draws:1u);++repeat) {
@@ -532,7 +568,7 @@ int main(int argc,char** argv) {
             }
             submission_us[serial]=std::chrono::duration<double,std::micro>(
                 std::chrono::steady_clock::now()-begin).count()/(benchmark?benchmark_draws:1u);
-            if (caller_state || full_samplers) {
+            if (caller_state || full_samplers || pixel_constants || register_pressure) {
                 if (caller_fault) {
                     const float corrupt[]{123,456,789,1};
                     gpu_check(device.SetPixelShaderConstantF(12,corrupt,1),"Inject caller-state corruption");
@@ -551,7 +587,32 @@ int main(int argc,char** argv) {
                 }
             }
             if (burst && serial<5) continue;
+            if (gpu_benchmark) {
+                gpu_check(gpu_end->Issue(D3DISSUE_END),"End benchmark GPU workload");
+                gpu_check(gpu_frequency->Issue(D3DISSUE_END),"Issue benchmark GPU frequency");
+                gpu_check(gpu_disjoint->Issue(D3DISSUE_END),"End benchmark GPU timing");
+            }
             gpu_check(device.EndScene(),"End reconstruction frame");
+            if (gpu_benchmark) {
+                const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+                const auto wait=[&](IDirect3DQuery9& query,void* value,UINT bytes) {
+                    for (;;) {
+                        const auto result=query.GetData(value,bytes,D3DGETDATA_FLUSH);
+                        gpu_check(result,"Read isolated benchmark GPU timer");
+                        if (result==S_OK) return;
+                        if (std::chrono::steady_clock::now()>deadline)
+                            throw std::runtime_error("Isolated GPU benchmark timed out");
+                        Sleep(1);
+                    }
+                };
+                UINT64 start=0,end=0,frequency=0;BOOL disjoint=FALSE;
+                wait(*gpu_end.get(),&end,sizeof(end));wait(*gpu_start.get(),&start,sizeof(start));
+                wait(*gpu_frequency.get(),&frequency,sizeof(frequency));
+                wait(*gpu_disjoint.get(),&disjoint,sizeof(disjoint));
+                if (disjoint || !frequency || end<start)
+                    throw std::runtime_error("Invalid isolated GPU benchmark interval");
+                gpu_us[serial]=double(end-start)*1000000/double(frequency)/benchmark_draws;
+            }
             gpu_check(device.GetRenderTargetData(backbuffer.get(),readback.get()),"Read reconstructed eye images");
             gpu_check(readback->LockRect(&lock,nullptr,D3DLOCK_READONLY),"Synchronize reconstruction pixels");
             bool correct=true;
@@ -708,11 +769,18 @@ int main(int argc,char** argv) {
         if (material_origin) std::cout<<"; large_world_origin; translated_material_precision";
         if (camera_only) std::cout<<"; material_camera_only; no_world_position_varying; original_camera_preserved; large_head_turns";
         if (motion) std::cout<<"; native_motion_policy_zeroed_without_mutating_caller_constants";
+        if (pixel_constants) std::cout<<"; paired_pixel_constants_no_texture_reads; full_caller_state_preserved; reset_recovered";
+        if (register_pressure) std::cout<<"; pixel_register_pressure_texture_fallback; full_caller_state_preserved; reset_recovered";
         if (benchmark) {
             std::cout<<"; benchmark_submission_us=[";
             for (unsigned index=0;index<submission_us.size();++index)
                 std::cout<<(index?",":"")<<submission_us[index];
             std::cout<<"]; includes_driver_submission_and_state_restoration; excludes_readbacks; not_headset_FPS";
+        }
+        if (gpu_benchmark) {
+            std::cout<<"; benchmark_gpu_us=[";
+            for (unsigned index=0;index<gpu_us.size();++index) std::cout<<(index?",":"")<<gpu_us[index];
+            std::cout<<"]; timestamp_disjoint_checked; per_draw_pixels="<<width*2*height;
         }
         std::cout<<'\n';return 0;
     } catch (const std::exception& error) {

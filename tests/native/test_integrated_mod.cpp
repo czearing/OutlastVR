@@ -30,6 +30,7 @@ unsigned scene_number=0;
 bool fault_dual=false;
 bool fault_mono=false;
 bool fault_flat_mono=false;
+bool material_constants=false;
 unsigned cull_checks=0,nonfinite_spheres=0;
 unsigned crosshair_updates=0;
 unsigned translucency_checks=0;
@@ -506,6 +507,13 @@ void create_geometry(IDirect3DDevice9& device) {
             vertex.replace(offset,name.size(),"Transform");
     }
     const char* pixel="float4 main(float3 color:TEXCOORD0):COLOR0 {return float4(color,1);}";
+    if (material_constants) pixel=R"(
+        float4 CameraPositionPS:register(c6);
+        float4 FogCameraPosition:register(c12);
+        float4 main(float3 color:TEXCOORD0):COLOR0 {
+            float3 error=FogCameraPosition.xyz-CameraPositionPS.xyz;
+            return float4(lerp(color,float3(1,0,1),step(.0001,dot(error,error))),1);
+        })";
     auto compile=[](const char* source,const char* profile,Com<ID3DBlob>& code) {
         Com<ID3DBlob> errors;
         const auto status=D3DCompile(source,std::strlen(source),nullptr,nullptr,nullptr,"main",profile,
@@ -576,10 +584,12 @@ int main(int argc,char** argv) {
             mode=="--ipd-cycle" || mode=="--input-chords" || mode=="--input-recovery" ||
             mode=="--reset-retry" || mode=="--flat-wrap" || mode=="--snap-recovery" ||
             mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
-            mode=="--fault-loading-blackout")),
+            mode=="--fault-loading-blackout" || mode=="--material-constants" ||
+            mode=="--fault-material-constants")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
+        material_constants=mode=="--material-constants" || mode=="--fault-material-constants";
         fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono" || fault_flat_mono;
         const bool loading_blackout=mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
             mode=="--fault-loading-blackout";
@@ -881,6 +891,11 @@ int main(int argc,char** argv) {
             }
             if ((!mock.ui || ui_owned) && !flat_only) main_stub(&viewport,nullptr,&family);
             auto render_frame=[&]{
+                if (mode=="--fault-material-constants") {
+                    const float wrong_camera[]{100,0,0,0};
+                    gpu_check(integrated_device->SetPixelShaderConstantF(12,wrong_camera,1),
+                        "Inject a wrong native material camera into the production fixture");
+                }
                 if (flat_only) {
                     counter.reset();mock.expected_instances=2;
                 } else if (ui_scaleform) {
@@ -1212,6 +1227,7 @@ int main(int argc,char** argv) {
             <<"native_loading_name_only; other_movies_visible; world_recovered_after_reset; "
             <<"native_loading_presents=8; direct_and_panel_paths; skipped_frame_mirror_black";
         if (flat_upload) std::cout<<"; UpdateSurface_full_and_partial_two_half_reference";
+        if (material_constants) std::cout<<"; native_material_pixel_camera_matches_independent_eye_camera; reset_recovered";
         if (mock.dynamic_ipd) std::cout<<"; runtime_ipd_changes_mm=64,78,50,72; current_eye_layers_and_disparity";
         if (ui_scaleform) std::cout<<"; native_scaleform_scope";
         if (camera_tilt) std::cout<<"; native_body_pitch_roll=0.35,0.18; absolute_eye_centroids=64; headset_gravity_upright";

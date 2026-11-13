@@ -29,6 +29,8 @@ REQUIRED_TESTS = {
     "test_integrated_thread_overlap", "test_integrated_ui_scaleform_handoff",
     "test_integrated_camera_bob", "test_integrated_camera_handoff", "test_integrated_floor_startup",
     "test_integrated_loading_blackout", "test_integrated_loading_upload_blackout",
+    "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
+    "test_integrated_material_constants",
     "python_regressions",
 }
 DLL_MODES = (
@@ -38,6 +40,7 @@ DLL_MODES = (
     "--input-chords", "--input-recovery", "--reset-retry",
     "--flat-transitions", "--flat-upload", "--flat-wrap",
     "--loading-blackout", "--loading-upload-blackout",
+    "--material-constants",
 )
 DLL_REJECTIONS = {
     "--fault-dual": "Compositor physical draw count failed: indexed=2; plain=0; instances=4",
@@ -47,6 +50,7 @@ DLL_REJECTIONS = {
     "--fault-camera-bob": "Compositor upright camera alignment failed:",
     "--fault-camera-handoff": "Compositor upright camera alignment failed:",
     "--fault-loading-blackout": "Compositor loading blackout contains visible or nonopaque pixels",
+    "--fault-material-constants": "Compositor geometry coverage failed:",
     "--fault-camera-tilt": "Compositor upright camera alignment failed:",
     "--comfort-fault-scale": "Compositor disparity failed:",
     "--fault-snap": "Compositor projected ray alignment failed:",
@@ -188,6 +192,7 @@ def main(argv=None):
             "camcorder": binaries / "test_outlast_camcorder.exe",
             "hand_collision": binaries / "test_outlast_hand_collision.exe",
             "body_lifecycle": binaries / "test_outlast_body_lifecycle.exe",
+            "atlas": binaries / "test_atlas_pixel_routing.exe",
         }
         inputs = {name: dict(path=str(path), sha256=sha256(path)) for name, path in paths.items()}
         report["inputs"] = inputs
@@ -235,6 +240,10 @@ def main(argv=None):
                         "completed_camera_pose_matches=12; native_camera_handoffs=2; unlinked_views=4; "
                         "native_origins_preserved; gameplay_stabilization_resumed",
                     ]
+                if mode == "--material-constants":
+                    markers += [
+                        "native_material_pixel_camera_matches_independent_eye_camera; reset_recovered",
+                    ]
                 if mode in ("--loading-blackout", "--loading-upload-blackout"):
                     markers += [
                         "loading_blackout_frames=6; opaque_black_eye_pixels=786432; native_loading_name_only; "
@@ -259,6 +268,8 @@ def main(argv=None):
         run("reject-nonblocking-volume", [paths["hand_collision"], "--fault-nonblocking-volume"],
             ["FAIL: Non-blocking room volume stopped controller hand tracking"],
             expected_code=1)
+        run("reject-hit-effect", [paths["atlas"], "--fault-hit-effects"],
+            ["FAIL: Hit-effect stereo UV, tint or recovery content mismatch"], expected_code=1)
         for name, original in inputs.items():
             if sha256(paths[name]) != original["sha256"]:
                 raise ValueError(f"Input changed during acceptance: {name}")
@@ -267,7 +278,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+4} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+5} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

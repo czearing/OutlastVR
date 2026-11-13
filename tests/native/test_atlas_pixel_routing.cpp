@@ -23,12 +23,15 @@ int main(int argc,char** argv) {
     try {
         const std::string mode=argc>1?argv[1]:"";
         if (argc>2 || (!mode.empty() && mode!="--fault-atlas" && mode!="--fault-camera" &&
-                       mode!="--fault-material" && mode!="--fault-scissor" && mode!="--fault-lookup-state"))
+                       mode!="--fault-material" && mode!="--fault-scissor" && mode!="--fault-lookup-state" &&
+                       mode!="--hit-effects" && mode!="--fault-hit-effects"))
             throw std::invalid_argument("Unknown atlas-routing control");
         const bool fault_atlas=mode=="--fault-atlas",fault_camera=mode=="--fault-camera";
         const bool fault_material=mode=="--fault-material";
         const bool fault_scissor=mode=="--fault-scissor";
         const bool fault_lookup_state=mode=="--fault-lookup-state";
+        const bool hit_effects=mode=="--hit-effects" || mode=="--fault-hit-effects";
+        const bool fault_hit=mode=="--fault-hit-effects";
         constexpr UINT eye_width=64,height=16;
         IsolatedDevice isolated(eye_width*2,height);
         auto& device=*isolated.device.get();
@@ -44,13 +47,17 @@ int main(int argc,char** argv) {
             SamplerState Material:register(s1);
             float4 Params:register(c0);
             float4 VisibleEyes:register(c1);
+            float4 HitEffect:register(c2);
+            float4 HitColor:register(c3);
             float4 CameraPositionPS:register(c6);
             float4 main(float2 uv:TEXCOORD0,float2 pixel:VPOS):COLOR {
                 clip(lerp(VisibleEyes.x,VisibleEyes.y,step(1.5,CameraPositionPS.x)));
                 float2 sampleUV=lerp(uv,pixel*Params.xy,Params.z);
+                float2 centered=sampleUV-.5;
+                sampleUV+=centered*dot(centered,centered)*HitEffect.x+HitEffect.yz;
                 float4 scene=tex2D(Scene,sampleUV+float2(Params.w,0));
                 float material=tex2D(Material,uv).r;
-                return float4(scene.rg*material,CameraPositionPS.x*.25,1);
+                return lerp(float4(scene.rg*material,CameraPositionPS.x*.25,1),HitColor,HitEffect.w);
             })";
         auto compile=[](const char* source,const char* profile,Com<ID3DBlob>& code) {
             Com<ID3DBlob> errors;
@@ -201,9 +208,15 @@ int main(int argc,char** argv) {
             const RECT scissor=frame==11?RECT{10,3,10,3}:
                 frame<6?RECT{0,0,eye_width,height}:RECT{10,3,55,13};
             const float visible_eyes[]{frame==10?-1.f:1.f,frame==9?-1.f:1.f,0,0};
+            const bool hit_active=hit_effects && sample_frame>=1 && sample_frame<=4;
+            const float hit[]{hit_active?.35f:0,hit_active?.125f:0,
+                hit_active?-.1875f:0,hit_active?.15f*sample_frame:0};
+            const float neutral_hit[4]{},hit_color[]{1,.125f,.0625f,1};
             gpu_check(device.SetScissorRect(&scissor),"Set half-open logical caller scissor");
             gpu_check(device.SetPixelShaderConstantF(0,parameters,1),"Bind UV/VPOS and border control");
             gpu_check(device.SetPixelShaderConstantF(1,visible_eyes,1),"Bind independent one-eye visibility controls");
+            gpu_check(device.SetPixelShaderConstantF(2,fault_hit?neutral_hit:hit,1),"Bind transient hit-style distortion and flash");
+            gpu_check(device.SetPixelShaderConstantF(3,hit_color,1),"Bind transient hit-style tint");
 #ifdef OLVR_ISOLATED_9ON12
             counter.reset();
 #endif
@@ -257,28 +270,44 @@ int main(int argc,char** argv) {
                 const UINT uv_x=in_viewport?((logical_x-viewport_x)*eye_width*2+viewport_width)/(viewport_width*2):0;
                 const UINT uv_y=in_viewport?((y-caller_viewport.Y)*height*2+caller_viewport.Height)/(caller_viewport.Height*2):0;
                 const int gray=64+uv_x*2;
-                const UINT source_x=sample_frame<2?0:sample_frame>=4?eye_width-1:
+                UINT source_x=sample_frame<2?0:sample_frame>=4?eye_width-1:
                     sample_frame%2?logical_x:uv_x;
-                const UINT source_y=sample_frame%2?y:uv_y;
+                UINT source_y=sample_frame%2?y:uv_y;
+                if (hit_active && in_viewport) {
+                    const double u=sample_frame%2?double(logical_x)/eye_width:
+                        double(logical_x-viewport_x)/viewport_width+.5/eye_width;
+                    const double v=sample_frame%2?double(y)/height:
+                        double(y-caller_viewport.Y)/caller_viewport.Height+.5/height;
+                    const double radial=((u-.5)*(u-.5)+(v-.5)*(v-.5))*hit[0];
+                    const double warped_u=u+(u-.5)*radial+hit[1]+parameters[3];
+                    const double warped_v=v+(v-.5)*radial+hit[2];
+                    source_x=UINT(std::clamp(std::floor(warped_u*eye_width),0.,double(eye_width-1)));
+                    source_y=UINT(std::clamp(std::floor(warped_v*height),0.,double(height-1)));
+                }
                 const int intensity=((96+source_x*2+source_y*2)*gray+127)/255;
                 const bool clipped=int(x%eye_width)<scissor.left || int(x%eye_width)>=scissor.right ||
                     int(y)<scissor.top || int(y)>=scissor.bottom || !in_viewport ||
                     (frame==9 && eye==1) || (frame==10 && eye==0);
                 if (!clipped) ++expected_samples;
                 const int red=(color>>16)&255,green=(color>>8)&255,blue=color&255;
-                const bool matches=std::abs(red-(eye || clipped?0:intensity))<=2 &&
-                    std::abs(green-(!eye || clipped?0:intensity))<=2 &&
-                    std::abs(blue-(clipped?0:eye?128:64))<=1;
+                const auto expected=[&](int original,unsigned channel) {
+                    return clipped?0:int(std::lround(original*(1-hit[3])+255*hit_color[channel]*hit[3]));
+                };
+                const bool matches=std::abs(red-expected(eye?0:intensity,0))<=2 &&
+                    std::abs(green-expected(!eye?0:intensity,1))<=2 &&
+                    std::abs(blue-expected(eye?128:64,2))<=(hit_effects?2:1);
                 if (!matches && correct)
                     std::cerr<<"Mismatch frame="<<frame<<" x="<<x<<" y="<<y
                         <<" rgb="<<red<<','<<green<<','<<blue<<" expected="
-                        <<(eye || clipped?0:intensity)<<','<<(!eye || clipped?0:intensity)<<','
-                        <<(clipped?0:eye?128:64)<<'\n';
+                        <<expected(eye?0:intensity,0)<<','<<expected(!eye?0:intensity,1)<<','
+                        <<expected(eye?128:64,2)<<'\n';
                 correct &= matches;
                 ++checked;
             }
             gpu_check(readback->UnlockRect(),"Unlock routed pixels");
-            if (!correct) throw std::runtime_error("Cross-eye atlas, material UV or tracked pixel camera content mismatch");
+            if (!correct) throw std::runtime_error(hit_effects?
+                "Hit-effect stereo UV, tint or recovery content mismatch":
+                "Cross-eye atlas, material UV or tracked pixel camera content mismatch");
             DWORD samples=UINT_MAX;
             const auto query_result=occlusion->GetData(&samples,sizeof(samples),D3DGETDATA_FLUSH);
             if (query_result!=S_OK || samples!=expected_samples)
@@ -294,7 +323,8 @@ int main(int argc,char** argv) {
                     std::to_string(counter.instances.load()));
 #endif
         }
-        if (!mode.empty()) throw std::runtime_error("Pixel routing incorrectly accepted a negative control");
+        if (!mode.empty() && mode!="--hit-effects")
+            throw std::runtime_error("Pixel routing incorrectly accepted a negative control");
         Com<IDirect3DBaseTexture9> unused;
         gpu_check(device.GetTexture(15,unused.put()),"Check unused atlas sampler restoration");
         if (unused.get()!=scene.get()) throw std::runtime_error("Declared-sampler optimization changed an unused binding");
@@ -303,6 +333,7 @@ int main(int argc,char** argv) {
                  <<"; declared_sampler_scan; unused_atlas_untouched; cube_conflict_rejected; exact_stereo_occlusion_samples"
                  <<"; point_lookup_complete_caller_state; native_point_linear_variant_separation"
                  <<"; left_only_query; right_only_query; occluded_both_query";
+        if (hit_effects) std::cout<<"; hit_style_radial_distortion_XY_offsets_and_flash; two_transient_cycles; neutral_recovery";
 #ifdef OLVR_ISOLATED_9ON12
         std::cout<<"; native_d3d12_draws=12; native_d3d12_instances=24";
 #endif

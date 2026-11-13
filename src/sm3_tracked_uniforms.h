@@ -149,7 +149,10 @@ inline TrackedPair track_uniforms(Pair pair) {
             continue;
         }
         const auto free_samplers=info.free(10,vertex?4:16);
-        const bool constant_rows=!vertex && free_samplers.empty();
+        unsigned tracked_rows=0;
+        for (const auto* binding:bindings) tracked_rows+=binding->rows;
+        const bool constant_rows=!vertex &&
+            (info.free(2,224).size()>=tracked_rows*2 || free_samplers.empty());
         const auto sampler=vertex && result.pair.view_texture?result.pair.sampler:
             constant_rows?0:first(free_samplers,"No free tracked uniform texture sampler");
         if (vertex) {
@@ -213,10 +216,10 @@ inline TrackedPair track_uniforms(Pair pair) {
                     info.used[2].set(right);
                     result.pixel_constant_rows.push_back({binding->texture_row+row,left,right});
                     op(prefix,1,{destination(0,temporary+row),source(2,left)});
-                    op(prefix,2,{destination(0,temporary+row),source(2,right),
-                        source(0,temporary+row)|0x01000000u});
-                    op(prefix,4,{destination(0,temporary+row),
-                        source(1,eye,result.pair.component*0x55),source(0,temporary+row),source(2,left)});
+                    // The left eye interpolates exact zero; select, never blend, camera matrices.
+                    op(prefix,88,{destination(0,temporary+row),
+                        source(1,eye,result.pair.component*0x55)|0x01000000u,
+                        source(0,temporary+row),source(2,right)});
                 } else {
                     op(prefix,vertex?95:66,{destination(0,temporary+row),source(0,uv),source(10,sampler)});
                     op(prefix,2,{destination(0,uv,1),source(0,uv,0),source(2,coordinate,0)});
