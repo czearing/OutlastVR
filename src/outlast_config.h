@@ -7,6 +7,11 @@
 #include <string>
 #include <cmath>
 #include <locale>
+#include <array>
+#include <string_view>
+#include <variant>
+#include <algorithm>
+#include <type_traits>
 
 namespace olvr {
 
@@ -28,6 +33,88 @@ struct OutlastConfig {
     OutlastComfortSettings comfort;
 };
 
+struct OutlastSetting {
+    using Member=std::variant<bool OutlastComfortSettings::*,float OutlastComfortSettings::*,
+        MovementReference OutlastComfortSettings::*,bool OutlastConfig::*,std::filesystem::path OutlastConfig::*>;
+    std::string_view key,label;
+    Member member;
+    float minimum=0,maximum=1,step=1;
+    std::string_view unit{};
+    bool live=false;
+    constexpr bool in_menu() const {
+        return live && (std::holds_alternative<bool OutlastComfortSettings::*>(member) ||
+            std::holds_alternative<float OutlastComfortSettings::*>(member) ||
+            std::holds_alternative<MovementReference OutlastComfortSettings::*>(member));
+    }
+    bool boolean() const {
+        return std::holds_alternative<bool OutlastComfortSettings::*>(member) ||
+            std::holds_alternative<bool OutlastConfig::*>(member);
+    }
+    bool path() const {return std::holds_alternative<std::filesystem::path OutlastConfig::*>(member);}
+    bool choice() const {return std::holds_alternative<MovementReference OutlastComfortSettings::*>(member);}
+    float value(const OutlastConfig& config) const {
+        return std::visit([&](auto field)->float {
+            using T=decltype(field);
+            if constexpr (std::is_same_v<T,std::filesystem::path OutlastConfig::*>)
+                return (config.*field).empty()?0.f:1.f;
+            else if constexpr (std::is_same_v<T,bool OutlastConfig::*>) return config.*field;
+            else return static_cast<float>(config.comfort.*field);
+        },member);
+    }
+    void assign(OutlastConfig& config,float value) const {
+        std::visit([&](auto field) {
+            using T=decltype(field);
+            if constexpr (std::is_same_v<T,std::filesystem::path OutlastConfig::*>)
+                throw std::logic_error("Cannot assign a numeric value to a configuration path");
+            else if constexpr (std::is_same_v<T,bool OutlastConfig::*>) config.*field=value!=0;
+            else if constexpr (std::is_same_v<T,bool OutlastComfortSettings::*>) config.comfort.*field=value!=0;
+            else if constexpr (std::is_same_v<T,MovementReference OutlastComfortSettings::*>)
+                config.comfort.*field=static_cast<MovementReference>(int(value));
+            else config.comfort.*field=value;
+        },member);
+    }
+};
+
+inline constexpr std::array outlast_settings{
+    OutlastSetting{"vr.hit_distortion","Hit rotation / zoom",&OutlastComfortSettings::hit_distortion,0,1,1,{},true},
+    OutlastSetting{"vr.bloom","Bloom",&OutlastComfortSettings::bloom,0,1,1,{},true},
+    OutlastSetting{"vr.film_grain","Film grain",&OutlastComfortSettings::film_grain,0,1,1,{},true},
+    OutlastSetting{"vr.body_follow","Body follows head",&OutlastComfortSettings::body_follow,0,1,1,{},true},
+    OutlastSetting{"vr.body_follow_deadzone","Body follow deadzone",&OutlastComfortSettings::body_follow_deadzone,
+        10,90,5,"deg",true},
+    OutlastSetting{"vr.hand_pickup_radius","Hand pickup distance",&OutlastComfortSettings::hand_pickup_radius,
+        .1f,.6f,.05f,"m",true},
+    OutlastSetting{"vr.vignette_strength","Movement vignette",&OutlastComfortSettings::vignette_strength,
+        0,1,.1f,"%",true},
+    OutlastSetting{"vr.snap_turn_degrees","Snap turn",&OutlastComfortSettings::snap_turn_degrees,15,90,15,"deg"},
+    OutlastSetting{"vr.seated","Seated mode",&OutlastComfortSettings::seated},
+    OutlastSetting{"vr.left_handed","Left handed",&OutlastComfortSettings::left_handed},
+    OutlastSetting{"vr.toggle_sprint","Toggle sprint",&OutlastComfortSettings::toggle_sprint},
+    OutlastSetting{"vr.movement_reference","Movement reference",&OutlastComfortSettings::movement_reference,0,3},
+    OutlastSetting{"vr.world_scale","World scale",&OutlastComfortSettings::world_scale,.5f,2,.1f},
+    OutlastSetting{"experimental.physical_camcorder","Physical camcorder",&OutlastConfig::physical_camcorder},
+    OutlastSetting{"experimental.instant_pickups","Instant pickups",&OutlastConfig::instant_pickups},
+    OutlastSetting{"game.executable","Game executable",&OutlastConfig::game_executable},
+    OutlastSetting{"vr.openxr_loader","OpenXR loader",&OutlastConfig::openxr_loader},
+};
+inline constexpr std::array<std::string_view,4> outlast_movement_references{"game","head","main_hand","off_hand"};
+inline constexpr unsigned outlast_setting_index(std::string_view key) {
+    for (unsigned i=0;i<outlast_settings.size();++i) if (outlast_settings[i].key==key) return i;
+    throw std::logic_error("Unknown configuration setting");
+}
+inline constexpr auto outlast_menu_settings=[] {
+    constexpr auto count=[] {
+        unsigned result=0;
+        for (const auto& setting:outlast_settings) if (setting.in_menu()) ++result;
+        return result;
+    }();
+    std::array<unsigned,count> result{};
+    unsigned row=0;
+    for (unsigned i=0;i<outlast_settings.size();++i)
+        if (outlast_settings[i].in_menu()) result[row++]=i;
+    return result;
+}();
+
 inline OutlastConfig parse_outlast_config(std::istream& input) {
     OutlastConfig result;
     std::string line,section;
@@ -48,7 +135,9 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         if (line.empty() || line[0]==';' || line[0]=='#') continue;
         if (line[0]=='[' && line.back()==']') {
             section=line.substr(1,line.size()-2);
-            if (section!="game" && section!="vr" && section!="experimental")
+            if (std::none_of(outlast_settings.begin(),outlast_settings.end(),[&](const auto& setting) {
+                return setting.key.substr(0,setting.key.find('.'))==section;
+            }))
                 throw error("unknown section "+section);
             continue;
         }
@@ -57,58 +146,38 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         const auto key=section+"."+trim(line.substr(0,split));
         auto value=trim(line.substr(split+1));
         if (!seen.insert(key).second) throw error("duplicate setting "+key);
-        if (key=="experimental.physical_camcorder" || key=="experimental.instant_pickups" ||
-            key=="vr.seated" || key=="vr.left_handed" ||
-            key=="vr.body_follow" ||
-            key=="vr.bloom" || key=="vr.film_grain" ||
-            key=="vr.toggle_sprint" || key=="vr.hit_distortion") {
+        const auto setting=std::find_if(outlast_settings.begin(),outlast_settings.end(),
+            [&](const auto& entry) {return entry.key==key;});
+        if (setting==outlast_settings.end()) throw error("unknown setting "+key);
+        if (setting->boolean()) {
             if (value!="true" && value!="false") throw error("expected true or false");
-            if (key=="experimental.physical_camcorder") result.physical_camcorder=value=="true";
-            else if (key=="experimental.instant_pickups") result.instant_pickups=value=="true";
-            else if (key=="vr.seated") result.comfort.seated=value=="true";
-            else if (key=="vr.left_handed") result.comfort.left_handed=value=="true";
-            else if (key=="vr.hit_distortion") result.comfort.hit_distortion=value=="true";
-            else if (key=="vr.body_follow") result.comfort.body_follow=value=="true";
-            else if (key=="vr.bloom") result.comfort.bloom=value=="true";
-            else if (key=="vr.film_grain") result.comfort.film_grain=value=="true";
-            else result.comfort.toggle_sprint=value=="true";
-        } else if (key=="vr.snap_turn_degrees" || key=="vr.world_scale" || key=="vr.vignette_strength" ||
-                   key=="vr.body_follow_deadzone" || key=="vr.hand_pickup_radius") {
+            setting->assign(result,value=="true");
+        } else if (!setting->choice() && !setting->path()) {
             std::istringstream number(value);number.imbue(std::locale::classic());
             float parsed=0;
             if (!(number>>parsed) || !(number>>std::ws).eof() || !std::isfinite(parsed))
                 throw error("expected a finite number");
-            if (key=="vr.snap_turn_degrees") {
-                if (parsed!=0 && (parsed<15 || parsed>90)) throw error("snap_turn_degrees must be 0 or 15..90");
-                result.comfort.snap_turn_degrees=parsed;
-            } else if (key=="vr.world_scale") {
-                if (parsed<.5f || parsed>2) throw error("world_scale must be 0.5..2");
-                result.comfort.world_scale=parsed;
-            } else if (key=="vr.body_follow_deadzone") {
-                if (parsed<10 || parsed>90) throw error("body_follow_deadzone must be 10..90");
-                result.comfort.body_follow_deadzone=parsed;
-            } else if (key=="vr.hand_pickup_radius") {
-                if (parsed<.1f || parsed>.6f) throw error("hand_pickup_radius must be 0.1..0.6 metres");
-                result.comfort.hand_pickup_radius=parsed;
-            } else {
-                if (parsed<0 || parsed>1) throw error("vignette_strength must be 0..1");
-                result.comfort.vignette_strength=parsed;
+            if ((parsed<setting->minimum || parsed>setting->maximum) &&
+                !(key=="vr.snap_turn_degrees" && parsed==0)) {
+                std::ostringstream range;range.imbue(std::locale::classic());
+                range<<key<<" must be "<<(key=="vr.snap_turn_degrees"?"0 or ":"")
+                    <<setting->minimum<<".."<<setting->maximum;
+                throw error(range.str());
             }
-        } else if (key=="vr.movement_reference") {
-            if (value=="game") result.comfort.movement_reference=MovementReference::game;
-            else if (value=="head") result.comfort.movement_reference=MovementReference::head;
-            else if (value=="main_hand") result.comfort.movement_reference=MovementReference::main_hand;
-            else if (value=="off_hand") result.comfort.movement_reference=MovementReference::off_hand;
-            else throw error("movement_reference must be game, head, main_hand or off_hand");
-        } else if (key=="game.executable" || key=="vr.openxr_loader") {
+            setting->assign(result,parsed);
+        } else if (setting->choice()) {
+            const auto choice=std::find(outlast_movement_references.begin(),outlast_movement_references.end(),value);
+            if (choice==outlast_movement_references.end())
+                throw error("movement_reference must be game, head, main_hand or off_hand");
+            setting->assign(result,float(choice-outlast_movement_references.begin()));
+        } else {
             if (!value.empty() && value.front()=='"') {
                 if (value.size()<2 || value.back()!='"') throw error("unterminated quoted path");
                 value=value.substr(1,value.size()-2);
             }
             if (value.find('\0')!=std::string::npos) throw error("path contains a NUL byte");
-            auto& destination=key=="game.executable"?result.game_executable:result.openxr_loader;
-            destination=std::filesystem::u8path(value);
-        } else throw error("unknown setting "+key);
+            result.*std::get<std::filesystem::path OutlastConfig::*>(setting->member)=std::filesystem::u8path(value);
+        }
     }
     if (input.bad()) throw std::runtime_error("Cannot finish reading OutlastVR.ini");
     return result;

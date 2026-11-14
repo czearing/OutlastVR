@@ -1,0 +1,14 @@
+{
+  "version": "0.1.0-rc.9",
+  "changes": [
+    "Fixed quick F10 taps and keyboard input ownership in the settings panel.",
+    "Reduced the F10 menu to seven live player settings.",
+    "Improved settings visibility in the headset and desktop mirror.",
+    "Improved executable compatibility with automatic native address discovery.",
+    "Removed unnecessary technical paths and experimental options from the default configuration."
+  ],
+  "known_issues": [
+    "Builds with different renderer layouts remain unsupported.",
+    "Historical store editions have not all been played."
+  ]
+}

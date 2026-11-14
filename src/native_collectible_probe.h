@@ -212,6 +212,8 @@ public:
         const auto length=GetModuleFileNameW(nullptr,path.data(),UINT(path.size()));
         if (!length || length>=path.size()) throw std::runtime_error("Cannot identify native collectible image");
         const OutlastNativeImage image(std::wstring(path.data(),length));
+        if (!image.canonical())
+            throw std::invalid_argument("The optional collectible evidence fixture requires its canonical diagnostic layout");
         for (const auto rva:{0xd8d920u,0xce9680u,0xd8ff70u}) {
             const auto body=image.body(rva,32);
             if (std::memcmp(reinterpret_cast<const void*>(base_+rva),body.data(),body.size())!=0)

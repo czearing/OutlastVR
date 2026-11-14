@@ -13,7 +13,6 @@ import time
 import xml.etree.ElementTree as ET
 
 
-RETAIL_SHA256 = "06c1c37c7f1d0bd0296328ff977ff847bee82f878fb4d79f4282a026aef68a96"
 REQUIRED_TESTS = {
     "test_outlast_config", "test_outlast_camcorder", "test_outlast_native_use",
     "test_outlast_motion_controls", "test_outlast_hand_pickup", "test_outlast_door",
@@ -35,6 +34,7 @@ REQUIRED_TESTS = {
     "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
     "test_integrated_material_constants",
     "test_integrated_door_no_animation",
+    "test_integrated_settings",
     "test_native_uniform_read_batching",
     "test_world_scissor", "test_world_scissor_gpu",
     "test_transparent_overdraw_stereo", "test_transparent_hit_overdraw",
@@ -48,7 +48,7 @@ DLL_MODES = (
     "--input-chords", "--input-recovery", "--reset-retry",
     "--flat-transitions", "--flat-upload", "--flat-wrap",
     "--loading-blackout", "--loading-upload-blackout",
-    "--material-constants", "--door-no-animation",
+    "--material-constants", "--door-no-animation", "--settings",
 )
 DLL_REJECTIONS = {
     "--fault-dual": "Compositor physical draw count failed: indexed=2; plain=0; instances=4",
@@ -62,6 +62,7 @@ DLL_REJECTIONS = {
     "--fault-camera-tilt": "Compositor upright camera alignment failed:",
     "--comfort-fault-scale": "Compositor disparity failed:",
     "--fault-snap": "Compositor projected ray alignment failed:",
+    "--fault-settings-stereo": "Compositor settings panel projection bounds failed:",
 }
 LIMITATIONS = [
     "No game launch, headset, Steam progression, or whole-campaign acceptance.",
@@ -186,14 +187,13 @@ def main(argv=None):
             raise RuntimeError("Need at least 2 GiB free evidence/build drive space")
         if module.name != "OutlastVRSinglePass.dll":
             raise ValueError("Select the actual OutlastVRSinglePass.dll")
-        if sha256(retail) != RETAIL_SHA256:
-            raise ValueError("Unsupported retail executable; no target will be executed")
         ctest = shutil.which("ctest")
         if not ctest:
             raise FileNotFoundError("ctest is required")
         binaries = build / "bin"
         paths = {
             "module": module, "retail": retail,
+            "native_image": binaries / "test_native_image.exe",
             "integrated": binaries / "test_integrated_mod.exe",
             "lifecycle": binaries / "test_openxr_lifecycle.exe",
             "uniforms": binaries / "test_tracked_uniforms.exe",
@@ -206,6 +206,8 @@ def main(argv=None):
         }
         inputs = {name: dict(path=str(path), sha256=sha256(path)) for name, path in paths.items()}
         report["inputs"] = inputs
+        run("native-abi-admission", [paths["native_image"], retail],
+            ["PASS: native image identity/mapping;"], timeout=120)
         root = Path(__file__).resolve().parents[1]
         revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                                   capture_output=True, text=True, check=True).stdout.strip()
@@ -271,6 +273,12 @@ def main(argv=None):
                     markers += [
                         "PASS: production_door_no_animation; native_selection_and_actor_open; "
                         "unchanged_hero_and_camera; no_door_teleport; locked_door_preserved",
+                    ]
+                if mode == "--settings":
+                    markers += [
+                        "PASS: production_F10_settings; native_system_key_taps; keyboard_changes; "
+                        "gameplay_input_blocked; flat_menu_not_double_projected; live_reset_and_resize; "
+                        "both_eye_pixels=14; desktop_frames=7; closed_world_disparity_restored",
                     ]
                 if mode in ("--loading-blackout", "--loading-upload-blackout"):
                     markers += [

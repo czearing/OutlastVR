@@ -30,6 +30,7 @@ unsigned scene_number=0;
 bool fault_dual=false;
 bool fault_mono=false;
 bool fault_flat_mono=false;
+bool fault_settings_stereo=false;
 bool material_constants=false;
 unsigned cull_checks=0,nonfinite_spheres=0;
 unsigned crosshair_updates=0;
@@ -64,6 +65,9 @@ void* native_movie_player=&native_movie_object;
 const wchar_t* native_movie_name=L"Intro";
 unsigned native_movie_queries=0;
 unsigned desktop_mirror_checks=0;
+bool settings_phase=false;
+bool settings_input_blocked=false;
+unsigned settings_desktop_checks=0;
 std::array<float,6> camera_base_pose{};
 float native_lean_weight=0;
 std::array<unsigned char,500*4> native_gamepads{};
@@ -82,7 +86,7 @@ HANDLE render_entered=nullptr,present_requested=nullptr,present_finished=nullptr
 XrResult XRAPI_CALL mono_locate(XrSession session,const XrViewLocateInfo* info,XrViewState* state,
     uint32_t capacity,uint32_t* count,XrView* output) {
     const auto result=locate(session,info,state,capacity,count,output);
-    if (result==XR_SUCCESS && (!fault_flat_mono || mock.flat_frame)) {
+    if (result==XR_SUCCESS && (fault_settings_stereo?mock.settings_frame:!fault_flat_mono || mock.flat_frame)) {
         output[1].pose=output[0].pose;output[1].fov=output[0].fov;
     }
     return result;
@@ -107,7 +111,8 @@ void WINAPI observe_desktop_mirror(IDirect3DDevice9* device,IDirect3DSurface9* s
     D3DSURFACE_DESC a{},b{};
     gpu_check(source->GetDesc(&a),"Read real mirror source extent");
     gpu_check(desktop->GetDesc(&b),"Read real desktop extent");
-    require(a.Width==b.Width*2 && a.Height==b.Height,"Unexpected mirror eye dimensions");
+    const bool same_extent=a.Width==b.Width*2 && a.Height==b.Height;
+    require(same_extent || settings_phase,"Unexpected mirror eye dimensions");
     gpu_check(device->CreateOffscreenPlainSurface(a.Width,a.Height,a.Format,D3DPOOL_SYSTEMMEM,
         source_copy.put(),nullptr),"Create mirror source observation");
     gpu_check(device->CreateOffscreenPlainSurface(b.Width,b.Height,b.Format,D3DPOOL_SYSTEMMEM,
@@ -118,14 +123,23 @@ void WINAPI observe_desktop_mirror(IDirect3DDevice9* device,IDirect3DSurface9* s
     gpu_check(source_copy->LockRect(&left,nullptr,D3DLOCK_READONLY),"Lock mirror source observation");
     gpu_check(desktop_copy->LockRect(&mirror,nullptr,D3DLOCK_READONLY),"Lock desktop observation");
     bool equal=true;
+    unsigned background=0,text=0;
     for (UINT y=0;y<b.Height;++y) for (UINT x=0;x<b.Width;++x) {
         const auto* expected=reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(left.pBits)+y*left.Pitch);
         const auto* actual=reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(mirror.pBits)+y*mirror.Pitch);
-        equal&=(expected[x]&0xffffff)==(actual[x]&0xffffff);
+        if (same_extent) equal&=(expected[x]&0xffffff)==(actual[x]&0xffffff);
+        const auto color=actual[x]&0xffffff;
+        background+=color==0x151a21;
+        text+=((color>>16)&255)>60 && ((color>>16)&255)<140 &&
+            ((color>>8)&255)>170 && (color&255)>210;
     }
     gpu_check(desktop_copy->UnlockRect(),"Unlock desktop observation");
     gpu_check(source_copy->UnlockRect(),"Unlock mirror source observation");
     require(equal,"Actual desktop backbuffer differs from the rendered left eye");
+    if (settings_phase && mock.settings_frame && mock.frame%5!=0) {
+        require(background>1000 && text>20,"F10 settings are absent from the actual desktop output");
+        ++settings_desktop_checks;
+    }
     ++desktop_mirror_checks;
 }
 void check_desktop_pacing() {
@@ -215,7 +229,8 @@ NATIVE void WINAPI input_tick_stub(void*,float) {
     require(gamepad_state_stub(0,&observed_gamepad)==ERROR_SUCCESS,"Native game did not receive virtual controller zero");
     XINPUT_STATE physical{};
     require(gamepad_state_stub(1,&physical)==ERROR_SUCCESS && physical.dwPacketNumber==123 &&
-        physical.Gamepad.wButtons==XINPUT_GAMEPAD_DPAD_LEFT,"Native motion hook changed unrelated controller");
+        physical.Gamepad.wButtons==(settings_input_blocked?0:XINPUT_GAMEPAD_DPAD_LEFT),
+        "Native motion hook failed scoped settings input ownership");
     ++motion_polls;
 }
 NATIVE void WINAPI camera_base_stub(void*,float* output) {
@@ -691,10 +706,11 @@ int main(int argc,char** argv) {
             mode=="--fault-loading-blackout" || mode=="--material-constants" ||
             mode=="--fault-material-constants" || mode=="--fault-headset-light" ||
             mode=="--fault-frame-pacing" || mode=="--door-no-animation" ||
-            mode=="--fault-door-no-animation")),
+            mode=="--fault-door-no-animation" || mode=="--settings" || mode=="--fault-settings-stereo")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
+        fault_settings_stereo=mode=="--fault-settings-stereo";
         material_constants=mode=="--material-constants" || mode=="--fault-material-constants";
         fault_mono=mode=="--fault-mono" || mode=="--fault-ui-mono" || fault_flat_mono;
         const bool loading_blackout=mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
@@ -763,7 +779,7 @@ int main(int argc,char** argv) {
             {-std::sin(roll),std::cos(roll)*std::cos(pitch),std::cos(roll)*std::sin(pitch)},
             {0,std::sin(pitch),-std::cos(pitch)},100,{0,0,0}};
         if (mode=="--fault-camera-tilt") config.world_up=frame.up;
-        config.xr_resolve=fault_mono?&mono_resolve:&resolve;
+        config.xr_resolve=fault_mono || fault_settings_stereo?&mono_resolve:&resolve;
         config.bindings={&main_stub,&enqueue_stub,&constructor_stub,&dispatch_stub,&render_stub,
             nullptr,&view_stub,native_indexed,&sphere_stub,&box_stub,&inside_stub,nullptr,&surface_stub,&batched_stub,&ui_stub,
             &sphere_inside_stub,&crosshair_update_stub};
@@ -1414,6 +1430,85 @@ int main(int argc,char** argv) {
         require(sphere_inside_stub(view_data.data()+0x3b0,center,&radius,&full)==0 && full==0,
             "Owned native sphere containment scope leaked after dispatch");
         const auto draws=counts.geometry_draws,replays=counts.consumed_replay_calls;
+        if (mode=="--settings" || fault_settings_stereo) {
+            settings_phase=true;
+            settings_input_blocked=true;
+            const auto key=[&](UINT code,UINT down=WM_KEYDOWN,UINT up=WM_KEYUP) {
+                for (const auto message:{down,up}) {
+                    require(PostMessageW(window.get(),message,code,0)!=FALSE,"Cannot queue production settings key");
+                    MSG event{};
+                    require(PeekMessageW(&event,window.get(),message,message,PM_REMOVE)!=FALSE &&
+                        event.message==WM_NULL,"Production settings key escaped to native gameplay");
+                    DispatchMessageW(&event);
+                }
+            };
+            const auto render_settings=[&](bool flat) {
+                main_stub(&viewport,nullptr,&family);
+                dispatch_stub(renderer_data.data());
+                input_tick_stub(nullptr,.015f);
+                if (mock.settings_frame)
+                    require(observed_gamepad.Gamepad.wButtons==0 && observed_gamepad.Gamepad.sThumbLX==0 &&
+                        observed_gamepad.Gamepad.sThumbRX==0,"F10 settings leaked controller input to gameplay");
+                if (flat) {
+                    Com<IDirect3DTexture9> video;
+                    Com<IDirect3DSurface9> image,output;
+                    gpu_check(integrated_device->CreateTexture(256,256,1,D3DUSAGE_RENDERTARGET,
+                        D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,video.put(),nullptr),"Create native menu settings fixture");
+                    gpu_check(video->GetSurfaceLevel(0,image.put()),"Get native menu settings image");
+                    gpu_check(integrated_device->ColorFill(image.get(),nullptr,0xff000000),"Clear native menu fixture");
+                    gpu_check(integrated_device->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,output.put()),
+                        "Get native menu settings target");
+                    gpu_check(integrated_device->StretchRect(image.get(),nullptr,output.get(),nullptr,D3DTEXF_NONE),
+                        "Select flat native menu before settings composition");
+                }
+                gpu_check(integrated_device->Present(nullptr,nullptr,nullptr,nullptr),"Present production F10 settings");
+            };
+            key(VK_F10,WM_SYSKEYDOWN,WM_SYSKEYUP);
+            mock.settings_frame=true;
+            mock.settings_anchor_frame=21;
+            render_settings(false); // 21: open with a complete key tap before the next XR frame.
+            key(VK_DOWN);key(VK_RETURN);
+            render_settings(false);
+            key(VK_ESCAPE);
+            mock.settings_frame=false;
+            render_settings(false); // Closing restores the original strict geometry/disparity oracle.
+            key(VK_F10,WM_SYSKEYDOWN,WM_SYSKEYUP);
+            mock.settings_frame=true;
+            mock.settings_anchor_frame=24;
+            render_settings(true);
+            render_settings(true); // 25: skipped XR frame must not retain an invalid submission.
+            render_settings(true);
+            const auto resize=[&](UINT width,UINT height) {
+                D3DPRESENT_PARAMETERS parameters{};
+                parameters.Windowed=TRUE;parameters.SwapEffect=D3DSWAPEFFECT_DISCARD;
+                parameters.BackBufferWidth=width;parameters.BackBufferHeight=height;
+                parameters.BackBufferFormat=D3DFMT_A8R8G8B8;parameters.hDeviceWindow=window.get();
+                gpu_check(integrated_device->Reset(&parameters),"Reset while production settings are open");
+                gpu_check(integrated_device->SetRenderState(D3DRS_ZENABLE,FALSE),"Restore settings test depth");
+                gpu_check(integrated_device->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE),"Restore settings test culling");
+                mock.settings_scaled=width!=256 || height!=256;
+            };
+            resize(320,288);
+            render_settings(true);
+            render_settings(false);
+            resize(256,256);
+            render_settings(false);
+            render_settings(false); // 30: another skipped frame before closing.
+            key(VK_F10,WM_SYSKEYDOWN,WM_SYSKEYUP);
+            mock.settings_frame=false;
+            render_settings(false);
+            settings_input_blocked=false;
+            render_settings(false);
+            require(observed_gamepad.Gamepad.sThumbLX!=0 && observed_gamepad.Gamepad.sThumbLY!=0,
+                "Closing F10 settings did not restore gameplay movement");
+            RuntimeStatistics settings_counts{};
+            require(statistics(&settings_counts)!=FALSE && settings_counts.settings_draws==7 &&
+                mock.settings_eye_checks==14 && settings_desktop_checks==7,
+                "Production settings coverage missed world, flat, resize, reset or desktop presentation");
+            std::cout<<"PASS: production_F10_settings; native_system_key_taps; keyboard_changes; "
+                "gameplay_input_blocked; flat_menu_not_double_projected; live_reset_and_resize; "
+                "both_eye_pixels=14; desktop_frames=7; closed_world_disparity_restored\n";
+        }
         flat_readback.reset();upload_source.reset();flat_texture.reset();offscreen_atlas.reset();
         geometry_indices.reset();geometry_vertices.reset();object_records.reset();
         geometry_declaration.reset();replay_declaration.reset();original_vertex.reset();original_pixel.reset();

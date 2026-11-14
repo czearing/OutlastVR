@@ -120,6 +120,7 @@ class OutlastWindowCursor {
     HHOOK hook_=nullptr;
     HHOOK input_hook_=nullptr;
     bool(WINAPI* settings_open_)()=nullptr;
+    bool(WINAPI* settings_key_)(UINT,WPARAM,LPARAM)=nullptr;
     UINT desktop_message_=0;
     bool desktop_pending_=false;
     std::exception_ptr desktop_error_;
@@ -151,6 +152,9 @@ class OutlastWindowCursor {
                 try {self->park_on_ui_thread();}
                 catch (...) {self->desktop_error_=std::current_exception();}
             }
+            if (self && event.hwnd==self->window_ && self->settings_key_ &&
+                self->settings_key_(event.message,event.wParam,event.lParam))
+                event.message=WM_NULL;
             if (self && event.hwnd==self->window_ && self->settings_open_ &&
                 self->settings_open_() &&
                 ((event.message>=WM_KEYFIRST && event.message<=WM_KEYLAST) ||
@@ -163,6 +167,12 @@ class OutlastWindowCursor {
         const auto result=CallNextHookEx(nullptr,code,message,data);
         if (code<0) return result;
         const auto& event=*reinterpret_cast<const CWPRETSTRUCT*>(data);
+        if (event.message==WM_KILLFOCUS) {
+            std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
+            const auto* self=instance_;
+            if (self && event.hwnd==self->window_ && self->settings_key_)
+                self->settings_key_(event.message,event.wParam,event.lParam);
+        }
         if (event.message!=WM_SETCURSOR || LOWORD(event.lParam)!=HTCLIENT) return result;
         std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
         const auto* self=instance_;
@@ -175,8 +185,10 @@ class OutlastWindowCursor {
     }
 public:
     OutlastWindowCursor(HWND window,const OutlastDesktopCursor& policy,
-        bool(WINAPI* focused_client)(HWND),bool(WINAPI* settings_open)()=nullptr):
-        window_(window),policy_(policy),focused_client_(focused_client),settings_open_(settings_open) {
+        bool(WINAPI* focused_client)(HWND),bool(WINAPI* settings_open)()=nullptr,
+        bool(WINAPI* settings_key)(UINT,WPARAM,LPARAM)=nullptr):
+        window_(window),policy_(policy),focused_client_(focused_client),settings_open_(settings_open),
+        settings_key_(settings_key) {
         DWORD process=0;
         const auto thread=GetWindowThreadProcessId(window,&process);
         if (!window || !focused_client || !thread || process!=GetCurrentProcessId())

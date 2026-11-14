@@ -109,6 +109,7 @@ bool body_probe=false;
 bool finger_gait_probe=false;
 bool floor_probe=false,contacts_probe=false,interaction_probe=false,floor_startup_probe=false;
 std::unique_ptr<NativeCollectibleProbe> collectible_probe;
+std::uintptr_t native_pause_engine=0;
 std::ofstream collectible_fixture;
 UINT64 collectible_settled_world=0,collectible_press_world=0;
 UINT64 collectible_obstacle_world=0;
@@ -365,6 +366,13 @@ void initialize_probe() {
     body_probe=body_length!=0;
     if (pause_menu_probe && !body_probe)
         throw std::runtime_error("Native pause-menu fixture requires actual gameplay and tracked Body input");
+    if (pause_menu_probe) {
+        std::array<wchar_t,32768> path{};
+        const auto length=GetModuleFileNameW(nullptr,path.data(),UINT(path.size()));
+        if (!length || length>=path.size()) throw std::runtime_error("Cannot identify the pause-menu native image");
+        const OutlastNativeImage image(std::wstring(path.data(),length));
+        native_pause_engine=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr))+image.rva(0x201b8e0);
+    }
     wchar_t fingers[2]{};
     const auto fingers_length=GetEnvironmentVariableW(L"OLVR_PROBE_FINGER_GAIT",fingers,2);
     if (fingers_length && (fingers_length!=1 || fingers[0]!=L'1' || !body_probe))
@@ -479,8 +487,9 @@ void initialize_probe() {
         const auto length=GetModuleFileNameW(nullptr,path.data(),UINT(path.size()));
         if (!length || length>=path.size()) throw std::runtime_error("Cannot identify native occlusion image");
         const OutlastNativeImage image(std::wstring(path.data(),length));
-        const auto body=image.body(0x8bb6f0,16);
-        const auto address=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr))+0x8bb6f0;
+        const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const auto body=image.loaded_body(0x8bb6f0,16,base);
+        const auto address=base+image.rva(0x8bb6f0);
         if (std::memcmp(reinterpret_cast<const void*>(address),body.data(),body.size())!=0)
             throw std::runtime_error("Native occlusion entry is already modified; observer refused");
         LARGE_INTEGER frequency{};
@@ -489,7 +498,7 @@ void initialize_probe() {
         occlusion_trace.open(evidence/L"native-occlusion.jsonl",std::ios::binary);
         occlusion_trace.precision(9);
         occlusion_trace<<"{\"kind\":\"observer\",\"fixture_version\":2,\"clock_frequency\":"
-            <<frequency.QuadPart<<",\"retail_sha256\":\""<<outlast_retail_sha256
+            <<frequency.QuadPart<<",\"retail_sha256\":\""<<image.digest()
             <<"\",\"entry_rva\":9156336,\"world_frame_first\":320,\"world_frame_last\":420,"
               "\"scope\":\"all_native_occlusion_calls_in_roomscale_pose_interval\","
               "\"argument5\":\"opaque_forwarded_stack_slot\","
@@ -1002,8 +1011,7 @@ XrResult XRAPI_CALL probe_end_frame(XrSession session,const XrFrameEndInfo* info
     if (!snapshot || !snapshot(&stats)) throw std::runtime_error("Cannot read actual native runtime statistics");
     const bool world_panel=stats.world_panel_draws>previous.world_panel_draws;
     if (pause_menu_probe && continue_progress.gameplay_frames()) {
-        const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-        const auto engine=occlusion_field<const void*>(reinterpret_cast<const void*>(base),0x201b8e0);
+        const auto engine=occlusion_field<const void*>(reinterpret_cast<const void*>(native_pause_engine),0);
         std::ofstream movies(evidence/L"native-pause-movies.jsonl",std::ios::app);
         movies<<"{\"gameplay_frame\":"<<continue_progress.gameplay_frames()
             <<",\"native_frame\":"<<stats.frames<<",\"world_panel\":"<<(world_panel?"true":"false")

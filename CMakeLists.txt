@@ -16,6 +16,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 option(OLVR_BUILD_DIAGNOSTICS "Build the developer-only headset-free probe" OFF)
 option(OLVR_GPU_TESTS "Run tests requiring a real D3D12 hardware GPU" OFF)
 set(OLVR_RETAIL_EXECUTABLE "" CACHE FILEPATH "Optional locally owned supported OLGame.exe for offline tests")
+set(OLVR_ALTERNATE_EXECUTABLE "" CACHE FILEPATH "Optional locally owned alternate Outlast image for offline discovery tests")
 set(OLVR_HERO_FIXTURE "" CACHE FILEPATH "Optional locally retained native rig fixture; never distributed")
 
 include(FetchContent)

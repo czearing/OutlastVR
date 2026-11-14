@@ -35,9 +35,8 @@ $relative = @($files | ForEach-Object {$_.FullName.Substring($stage.Length + 1)}
 if (@(Compare-Object ($expected | Sort-Object) ($relative | Sort-Object)).Count) {
     throw "Package contains missing or unexpected files: $($relative -join ', ')"
 }
-if ((Get-Content -LiteralPath (Join-Path $stage 'OutlastVR.ini') -Raw) -notmatch '(?m)^physical_camcorder=false\r?$') {
-    throw 'Release must default to native full-view night vision'
-}
+& python (Join-Path $root 'tools\verify_package.py') --config-only (Join-Path $stage 'OutlastVR.ini')
+if ($LASTEXITCODE -ne 0) {throw 'Release must default to native full-view night vision'}
 $manifest = [ordered]@{
     name = 'Outlast VR'
     version = $Version

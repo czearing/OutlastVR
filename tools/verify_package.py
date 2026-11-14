@@ -1,5 +1,6 @@
 """Verify exactly the release files, manifest, DLL dependencies and safe preflight."""
 import argparse
+import configparser
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -16,6 +17,12 @@ def verify_documentation(readme, source_commit):
         r"https://github\.com/czearing/OutlastVR/(?:blob|tree)/([^/\s)]+)/", readme)
     if not revisions or any(revision != source_commit for revision in revisions):
         raise ValueError("Packaged documentation links must use the package source commit")
+
+def verify_safe_defaults(config):
+    parsed = configparser.ConfigParser(interpolation=None)
+    parsed.read_string(config)
+    if parsed.get("experimental", "physical_camcorder", fallback="false") != "false":
+        raise ValueError("Release config enables the experimental camcorder or has an invalid override")
 
 
 def verify(folder):
@@ -40,8 +47,7 @@ def verify(folder):
     verify_documentation((folder / "README.md").read_text(encoding="utf-8-sig"),
                          manifest["source_commit"])
     config = (folder / "OutlastVR.ini").read_text(encoding="utf-8-sig")
-    if "\nphysical_camcorder=false\n" not in "\n" + config.replace("\r\n", "\n"):
-        raise ValueError("Release config does not disable the experimental camcorder")
+    verify_safe_defaults(config)
     # Restricted DLL search proves the package does not rely on the developer's PATH.
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.FreeLibrary.argtypes = [wintypes.HMODULE]
@@ -65,7 +71,14 @@ def verify(folder):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("folder", type=Path)
+    parser.add_argument("folder", type=Path, nargs="?")
+    parser.add_argument("--config-only", type=Path)
     args = parser.parse_args()
+    if bool(args.folder) == bool(args.config_only):
+        parser.error("Specify either a package folder or --config-only")
+    if args.config_only:
+        verify_safe_defaults(args.config_only.read_text(encoding="utf-8-sig"))
+        print("PASS: release configuration retains safe native defaults")
+        raise SystemExit(0)
     result = verify(args.folder)
     print(f"PASS: Outlast VR {result['version']}; exact package and standalone DLL loads; no game launched")

@@ -21,7 +21,12 @@ class DocumentationTests(unittest.TestCase):
         text = (ROOT / "docs" / "settings.md").read_text(encoding="utf-8")
         rows = re.findall(r"^\| `([^`]+)` \| `([^`]+)` \|", text, re.MULTILINE)
         self.assertEqual(len(rows), len(dict(rows)), "Duplicate setting in reference")
-        self.assertEqual({key: "" if value == "empty" else value for key, value in rows}, shipped)
+        documented = {key: "" if value == "empty" else value for key, value in rows}
+        self.assertEqual({key: documented[key] for key in shipped}, shipped)
+        header = (ROOT / "src" / "outlast_config.h").read_text(encoding="utf-8")
+        self.assertEqual(set(documented), set(re.findall(r'OutlastSetting\{"([^"]+)"', header)))
+        self.assertTrue(all(key.startswith("vr.") and key != "vr.openxr_loader" for key in shipped),
+                        "Advanced overrides or experiments leaked into the player-facing sample")
 
     def test_compatibility_identifies_the_accepted_executable(self):
         header = (ROOT / "src" / "outlast_native_image.h").read_text(encoding="utf-8")
@@ -73,6 +78,13 @@ class DocumentationTests(unittest.TestCase):
             package.verify_documentation("No guide links", commit)
         with self.assertRaisesRegex(ValueError, "full source commit"):
             package.verify_documentation(readme, "master")
+
+    def test_package_accepts_omitted_safe_experimental_defaults(self):
+        package.verify_safe_defaults("[vr]\nbloom=true\n")
+        package.verify_safe_defaults("[experimental]\nphysical_camcorder=false\n")
+        for value in ("true", "invalid"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "camcorder"):
+                package.verify_safe_defaults(f"[experimental]\nphysical_camcorder={value}\n")
 
 
 if __name__ == "__main__":

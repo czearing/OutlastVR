@@ -168,7 +168,9 @@ int wmain(int argc,wchar_t** argv) {
             check(entry!=nullptr,"Configured OpenXR loader is missing xrGetInstanceProcAddr");
         }
         if (verify) {
-            std::cout<<"PASS: exact retail SHA256, mod export and OpenXR loader; no game process created\n";
+            std::cout<<"PASS: compatible native ABI "<<image.profile()
+                <<", mod export and OpenXR loader; no game process created\n"
+                <<"Executable SHA256 (diagnostic only): "<<image.digest()<<'\n';
             return 0;
         }
         std::filesystem::path evidence;
@@ -212,7 +214,7 @@ int wmain(int argc,wchar_t** argv) {
         call(process.hProcess,remote_system_function(process.dwProcessId,"LoadLibraryW"),
             argument.get(),"Load the separate mod DLL");
         const auto module=remote_module(process.dwProcessId,dll.filename().wstring());
-        const auto status=call(process.hProcess,module+offset,nullptr,"Initialize exact-build renderer and OpenXR hooks");
+        const auto status=call(process.hProcess,module+offset,nullptr,"Initialize compatible native renderer and OpenXR hooks");
         if (status!=0) throw std::runtime_error("Mod initialization refused; read logs\\OutlastVRSinglePass.log; status="+std::to_string(status));
         check(ResumeThread(process.hThread)!=DWORD(-1),"Resume user-requested modded Outlast");
         resumed=true;

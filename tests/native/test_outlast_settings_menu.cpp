@@ -1,11 +1,16 @@
 #include "outlast_settings_menu.h"
 #include "outlast_desktop_cursor.h"
+#include "outlast_desktop_mirror.h"
 #include <iostream>
 using namespace olvr;
 namespace {
 bool input_owned=true;
-bool WINAPI owned_menu() {return input_owned;}
+OutlastSettingsMenu* active_menu=nullptr;
+bool WINAPI owned_menu() {return input_owned || (active_menu && active_menu->captures_input());}
 bool WINAPI owned_client(HWND) {return true;}
+bool WINAPI settings_key(UINT message,WPARAM key,LPARAM bits) {
+    return active_menu && active_menu->message(message,key,bits);
+}
 }
 int main() {
     try {
@@ -14,14 +19,17 @@ int main() {
         };
         OutlastConfig config;
         OutlastSettingsMenu menu;menu.configure(config);
-        std::array<bool,7> keys{};
+        constexpr int codes[]{VK_F10,VK_ESCAPE,VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT,VK_RETURN};
         auto press=[&](unsigned key) {
-            menu.keyboard({},true);keys={};keys[key]=true;menu.keyboard(keys,true);
+            menu.message(WM_KEYDOWN,codes[key],0);
+            menu.message(WM_KEYUP,codes[key],0);
+            menu.poll_messages();
         };
         press(0);
         require(menu.visible(),"F10 did not open settings");
-        menu.keyboard(keys,true);
+        menu.message(WM_KEYDOWN,VK_F10,LPARAM(1)<<30);menu.poll_messages();
         require(menu.visible(),"Held F10 repeatedly toggled settings");
+        menu.message(WM_KEYUP,VK_F10,0);menu.poll_messages();
         require(!menu.enabled(OutlastSettingsMenu::hit_distortion),"Nausea unexpectedly enabled by default");
         press(6);
         require(menu.enabled(OutlastSettingsMenu::hit_distortion),"Keyboard toggle not immediately visible");
@@ -58,15 +66,51 @@ int main() {
             if ((color&0xffffff)==0x64cdff) ++text;
         }
         require(text>100,"Live settings labels are absent from actual raster");
-        press(1);require(!menu.visible(),"Escape did not close settings");
+        menu.message(WM_KEYDOWN,VK_ESCAPE,0);menu.poll_messages();
+        require(!menu.visible(),"Escape did not close settings");
         require(menu.captures_input(),"Closing Escape leaked into the native pause menu");
-        menu.keyboard(keys,true);
+        menu.poll_messages();
         require(menu.captures_input(),"Held closing Escape released native input ownership");
-        menu.keyboard({},true);
+        menu.message(WM_KEYUP,VK_ESCAPE,0);
+        menu.poll_messages();
         require(!menu.captures_input(),"Native input did not recover after the closing key was released");
-        menu.keyboard({},false);keys={};keys[0]=true;menu.keyboard(keys,true);
-        require(!menu.visible(),"Held F10 from another application opened the game menu");
+        menu.message(WM_KEYDOWN,VK_F10,0);menu.message(WM_KILLFOCUS,0,0);menu.poll_messages();
+        require(!menu.visible(),"Losing focus retained a stale opening key");
+        menu.message(WM_KEYDOWN,VK_F10,LPARAM(1)<<30);menu.poll_messages();
+        require(!menu.visible(),"A held F10 opened settings after focus recovery");
+        menu.message(WM_KEYUP,VK_F10,0);
         press(0);require(menu.visible(),"Fresh focused F10 did not recover");
+        press(1);menu.poll_messages();
+        menu.message(WM_SYSKEYDOWN,VK_F10,0);menu.message(WM_SYSKEYUP,VK_F10,0);
+        menu.message(WM_SYSKEYDOWN,VK_F10,0);menu.message(WM_SYSKEYUP,VK_F10,0);
+        menu.poll_messages();
+        require(!menu.visible(),"Two fast F10 taps lost their ordering");
+        std::istringstream configured("[vr]\nbloom=false\nbody_follow_deadzone=55\nhand_pickup_radius=.45\n"
+            "movement_reference=off_hand\nworld_scale=1.5\n");
+        const auto defaults=parse_outlast_config(configured);
+        menu.configure(defaults);
+        for (unsigned i=0;i<outlast_settings.size();++i)
+            require(menu.value(i)==outlast_settings[i].value(defaults),"Menu diverged from a parsed INI setting");
+        require(menu.formatted(OutlastSettingsMenu::bloom)=="OFF" &&
+            menu.formatted(OutlastSettingsMenu::body_deadzone)=="55 deg" &&
+            menu.formatted(OutlastSettingsMenu::pickup_radius)=="45 cm" &&
+            menu.formatted(outlast_setting_index("vr.movement_reference"))=="off_hand",
+            "Configured menu values are incorrectly formatted");
+        press(0);
+        const auto initial=menu.selected();
+        std::set<unsigned> visited;
+        for (unsigned row=0;row<menu.count;++row) {
+            require(outlast_settings[menu.selected()].in_menu(),"An advanced or non-live setting cluttered the player menu");
+            require(visited.insert(menu.selected()).second,"Settings navigation repeated a row before wrapping");
+            press(3);
+        }
+        require(menu.selected()==initial,"Player menu did not wrap after the visible options");
+        for (unsigned option=0;option<outlast_settings.size();++option)
+            require(bool(visited.count(option))==outlast_settings[option].in_menu(),
+                "Player menu omitted a live option or exposed an advanced setting");
+        require(menu.value(outlast_setting_index("vr.world_scale"))==1.5f,
+            "Browsing the player menu changed a startup-only preference");
+        press(1);menu.poll_messages();
         const auto instance=GetModuleHandleW(nullptr);
         WNDCLASSW type{};type.lpfnWndProc=&DefWindowProcW;type.hInstance=instance;
         type.lpszClassName=L"OutlastVRSettingsInputTest";
@@ -76,7 +120,8 @@ int main() {
         require(window!=nullptr,"Cannot create hidden settings input test window");
         {
             OutlastDesktopCursor cursor(0x1000,0x100);
-            OutlastWindowCursor hook(window,cursor,&owned_client,&owned_menu);
+            OutlastSettingsMenu transport;active_menu=&transport;
+            OutlastWindowCursor hook(window,cursor,&owned_client,&owned_menu,&settings_key);
             MSG message{};
             while (PeekMessageW(&message,window,0,0,PM_REMOVE)) {}
             for (const auto code:{WM_KEYDOWN,WM_KEYUP,WM_CHAR,WM_LBUTTONDOWN,WM_LBUTTONUP,WM_MOUSEMOVE}) {
@@ -91,6 +136,28 @@ int main() {
             require(PostMessageW(window,WM_KEYDOWN,0,0)!=FALSE &&
                 PeekMessageW(&message,window,0,0,PM_REMOVE)!=FALSE && message.message==WM_KEYDOWN,
                 "Closing settings did not restore native keyboard messages");
+            for (unsigned cycle=0;cycle<100;++cycle) {
+                for (const auto code:{WM_SYSKEYDOWN,WM_SYSKEYUP}) {
+                    require(PostMessageW(window,UINT(code),VK_F10,0)!=FALSE &&
+                        PeekMessageW(&message,window,0,0,PM_REMOVE)!=FALSE && message.message==WM_NULL,
+                        "F10 reached the native Windows system-menu handler");
+                }
+                transport.poll_messages();
+                require(transport.visible()==(cycle%2==0),"Queued F10 toggle was missed or repeated");
+            }
+            transport.poll_messages();
+            {
+                OutlastDesktopMirror mirror(&settings_key);
+                for (const auto code:{WM_SYSKEYDOWN,WM_SYSKEYUP})
+                    SendMessageW(mirror.window(),UINT(code),VK_F10,0);
+                transport.poll_messages();
+                require(transport.visible(),"F10 in the spectator window did not open settings");
+                for (const auto code:{WM_KEYDOWN,WM_KEYUP})
+                    SendMessageW(mirror.window(),UINT(code),VK_ESCAPE,0);
+                transport.poll_messages();
+                require(!transport.visible(),"Escape in the spectator window did not close settings");
+            }
+            active_menu=nullptr;
         }
         require(DestroyWindow(window)!=FALSE && UnregisterClassW(type.lpszClassName,instance)!=FALSE,
             "Settings input hook did not release its hidden test window");

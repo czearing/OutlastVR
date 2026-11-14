@@ -85,7 +85,7 @@ struct RuntimeBindings {
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=17;
+    UINT version=18;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};
@@ -123,6 +123,7 @@ struct RuntimeStatistics {
     float standing_reference_m=0;
     BOOL floor_reference_ready=FALSE;
     UINT doors_opened_without_animation=0;
+    UINT settings_draws=0;
 };
 
 }

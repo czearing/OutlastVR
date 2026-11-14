@@ -49,10 +49,18 @@ if(OLVR_HERO_FIXTURE)
     endforeach()
 endif()
 if(OLVR_RETAIL_EXECUTABLE)
-    foreach(name IN ITEMS test_native_image test_native_visibility test_native_sphere_inside)
+    foreach(name IN ITEMS test_native_image test_native_functions test_native_contracts test_native_visibility test_native_sphere_inside)
         olvr_test(${name} "${OLVR_RETAIL_EXECUTABLE}")
         target_link_options(${name} PRIVATE -municode)
     endforeach()
+endif()
+if(OLVR_ALTERNATE_EXECUTABLE AND TARGET test_native_functions)
+    add_test(NAME test_native_functions_alternate
+        COMMAND test_native_functions "${OLVR_ALTERNATE_EXECUTABLE}" --alternate)
+    set_tests_properties(test_native_functions_alternate PROPERTIES LABELS "cpu" TIMEOUT 120)
+    add_test(NAME test_native_contracts_alternate
+        COMMAND test_native_contracts "${OLVR_ALTERNATE_EXECUTABLE}" --alternate)
+    set_tests_properties(test_native_contracts_alternate PROPERTIES LABELS "cpu" TIMEOUT 120)
 endif()
 
 if(OLVR_GPU_TESTS)
@@ -143,7 +151,7 @@ if(OLVR_GPU_TESTS)
         endforeach()
         foreach(mode IN ITEMS thread-handoff thread-overlap ui ui-in-renderer
                 ui-scaleform ui-scaleform-handoff camera-tilt camera-bob camera-handoff floor-startup
-                loading-blackout loading-upload-blackout material-constants door-no-animation)
+                loading-blackout loading-upload-blackout material-constants door-no-animation settings)
             string(REPLACE "-" "_" test_mode "${mode}")
             add_test(NAME test_integrated_${test_mode} COMMAND test_integrated_mod
                 "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --${mode})

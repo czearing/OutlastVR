@@ -6,9 +6,9 @@
 An unofficial OpenXR mod for **Outlast**, with tracked head and hands,
 motion-controller input and single-pass stereo rendering.
 
-Requires the supported 64-bit Steam executable, Windows 10/11, a DirectX 12 GPU
+Requires a compatible 64-bit Outlast executable, Windows 10/11, a DirectX 12 GPU
 and an active OpenXR runtime. See [compatibility](https://github.com/czearing/OutlastVR/blob/master/docs/compatibility.md)
-for the accepted game build and controller profiles.
+for validated native layouts, current testing limits and controller profiles.
 
 ## Install
 

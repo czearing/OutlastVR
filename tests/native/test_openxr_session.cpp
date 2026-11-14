@@ -62,6 +62,8 @@ struct Mock {
     bool gated_release_test=false,fault_serial_wait=false;
     UINT gated_releases=0;
     bool geometry = false;
+    bool settings_frame=false,settings_scaled=false;
+    UINT settings_eye_checks=0,settings_anchor_frame=0;
     bool recentered = false;
     float comfort_world_scale=1;
     bool comfort_seated=false;
@@ -612,6 +614,9 @@ bool inspect_gpu_eyes() {
     double y_sums[2][2]{},expected_sums[2][2]{},expected_y[2][2]{};
     UINT counts[2][2]{};
     UINT expected_counts[2][2]{};
+    UINT settings_background[2]{},settings_selection[2]{},settings_text[2]{};
+    RECT settings_bounds[2]{{LONG(mock.extent),LONG(mock.height()),-1,-1},
+        {LONG(mock.extent),LONG(mock.height()),-1,-1}};
     const auto ui=mock.ui?std::make_unique<UIOracle>():nullptr;
     const auto snap=mock.snap_test?std::make_unique<SnapOracle>():nullptr;
     const auto flat=mock.flat_frame?std::make_unique<FlatOracle>():nullptr;
@@ -621,7 +626,18 @@ bool inspect_gpu_eyes() {
                 DWORD pixel;
                 std::memcpy(&pixel, static_cast<const char*>(pointer) + footprints[eye].Offset +
                             y * footprints[eye].Footprint.RowPitch + x * 4, 4);
-                if (mock.loading_blackout_frame) {
+                if (mock.settings_frame) {
+                    const auto color=pixel&0xffffff;
+                    settings_background[eye]+=color==0x151a21;
+                    if (color==0x151a21) {
+                        auto& bounds=settings_bounds[eye];
+                        bounds.left=std::min(bounds.left,LONG(x));bounds.right=std::max(bounds.right,LONG(x));
+                        bounds.top=std::min(bounds.top,LONG(y));bounds.bottom=std::max(bounds.bottom,LONG(y));
+                    }
+                    settings_selection[eye]+=color==0x2a3c50;
+                    settings_text[eye]+=((color>>16)&255)>60 && ((color>>16)&255)<140 &&
+                        ((color>>8)&255)>170 && (color&255)>210;
+                } else if (mock.loading_blackout_frame) {
                     valid=valid && pixel==0xff000000;
                     ++mock.loading_blackout_pixels;
                 } else if (mock.geometry) {
@@ -652,6 +668,63 @@ bool inspect_gpu_eyes() {
             }
     D3D12_RANGE written{0, 0};
     readback->Unmap(0, &written);
+    if (mock.settings_frame) {
+        for (unsigned eye=0;eye<2;++eye) {
+            if (settings_background[eye]<1000 || settings_selection[eye]<100 || settings_text[eye]<20) {
+                std::cerr<<"Compositor settings panel missing or projected twice: eye="<<eye
+                    <<"; background="<<settings_background[eye]<<"; selection="<<settings_selection[eye]
+                    <<"; text="<<settings_text[eye]<<'\n';
+                return false;
+            }
+            const auto& view=mock.views[eye];
+            const double l=std::tan(double(view.fov.angleLeft)),r=std::tan(double(view.fov.angleRight));
+            const double t=std::tan(double(view.fov.angleUp)),b=std::tan(double(view.fov.angleDown));
+            double half=1e9;
+            for (unsigned located=0;located<2;++located) {
+                const auto& fov=mock.views[located].fov;
+                const double offset=located?.032:-.032;
+                half=std::min({half,-offset-2*std::tan(double(fov.angleLeft)),
+                    offset+2*std::tan(double(fov.angleRight)),
+                    2*std::tan(double(fov.angleUp)),-2*std::tan(double(fov.angleDown))});
+            }
+            const double center_x=(mock.settings_anchor_frame-1)*.001;
+            const double center_y=(mock.settings_anchor_frame-1)*.01;
+            const double eye_x=view.pose.position.x-.001,eye_y=view.pose.position.y-.01;
+            const auto screen_x=[&](double world) {return ((world-eye_x)/2-l)/(r-l)*mock.extent-.5;};
+            const auto screen_y=[&](double world) {return (t-(world-eye_y)/2)/(t-b)*mock.height()-.5;};
+            const RECT expected{
+                std::max<LONG>(0,LONG(std::ceil(screen_x(center_x-half)))),
+                std::max<LONG>(0,LONG(std::ceil(screen_y(center_y+half)))),
+                std::min<LONG>(mock.extent-1,LONG(std::floor(screen_x(center_x+half)))),
+                std::min<LONG>(mock.height()-1,LONG(std::floor(screen_y(center_y-half))))};
+            const auto actual=settings_bounds[eye];
+            if (std::abs(actual.left-expected.left)>2 || std::abs(actual.right-expected.right)>2 ||
+                std::abs(actual.top-expected.top)>2 || std::abs(actual.bottom-expected.bottom)>2) {
+                std::cerr<<"Compositor settings panel projection bounds failed: frame="<<mock.frame<<"; eye="<<eye
+                    <<"; actual="<<actual.left<<','<<actual.top<<','<<actual.right<<','<<actual.bottom
+                    <<"; expected="<<expected.left<<','<<expected.top<<','<<expected.right<<','<<expected.bottom<<'\n';
+                return false;
+            }
+        }
+        if (!mock.counter || mock.counter->events().size()<2) {
+            std::cerr<<"Settings frame lacks independent scene/overlay draws; frame="<<mock.frame<<'\n';
+            return false;
+        }
+        unsigned stereo_draws=0;
+        for (const auto& event:mock.counter->events()) {
+            // D3D9On12 uses nonindexed, one-instance blits for resized StretchRect copies.
+            if (mock.settings_scaled && !event.indexed && event.instances==1) continue;
+            if (!event.indexed || event.instances!=2) {
+                std::cerr<<"Settings composition is not single-pass stereo; frame="<<mock.frame
+                    <<"; indexed="<<event.indexed<<"; instances="<<event.instances<<'\n';
+                return false;
+            }
+            ++stereo_draws;
+        }
+        if (stereo_draws<2) return false;
+        mock.settings_eye_checks+=2;
+        return true;
+    }
     if (mock.loading_blackout_frame && !valid)
         std::cerr<<"Compositor loading blackout contains visible or nonopaque pixels\n";
     if (mock.geometry) {

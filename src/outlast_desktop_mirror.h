@@ -16,6 +16,7 @@ class OutlastDesktopMirror {
     std::thread thread_;
     std::exception_ptr error_;
     HWND window_=nullptr;
+    bool(WINAPI* key_)(UINT,WPARAM,LPARAM)=nullptr;
     bool started_=false;
     std::atomic<bool> closed_{false};
     Com<ID3D12Device> device_;
@@ -41,8 +42,9 @@ class OutlastDesktopMirror {
             const auto* creation=reinterpret_cast<const CREATESTRUCTW*>(l);
             SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(creation->lpCreateParams));
         }
+        auto* mirror=reinterpret_cast<OutlastDesktopMirror*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+        if (mirror && mirror->key_ && mirror->key_(message,w,l)) return 0;
         if (message==WM_CLOSE) {
-            auto* mirror=reinterpret_cast<OutlastDesktopMirror*>(GetWindowLongPtrW(window,GWLP_USERDATA));
             if (mirror) mirror->closed_=true;
             ShowWindow(window,SW_HIDE);
             return 0;
@@ -105,7 +107,7 @@ class OutlastDesktopMirror {
         if (type && !UnregisterClassW(L"OutlastVRDesktopMirror",module)) std::terminate();
     }
 public:
-    OutlastDesktopMirror() {
+    explicit OutlastDesktopMirror(bool(WINAPI* key)(UINT,WPARAM,LPARAM)=nullptr):key_(key) {
         thread_=std::thread([this] {run();});
         std::unique_lock<std::mutex> lock(mutex_);
         ready_.wait(lock,[this] {return started_;});

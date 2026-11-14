@@ -158,6 +158,22 @@ class Runtime {
     OutlastRendererOwnership ownership_;
     RuntimeBindings original_{};
     std::uintptr_t base_=0;
+    OutlastNativeBindings native_bindings_;
+    bool native_canonical_=true;
+    UINT native_rva(UINT source) const {return native_canonical_?source:native_bindings_.rva(source);}
+    std::uintptr_t native_address(UINT source,std::size_t size=1) const {
+        const auto rva=native_rva(source);
+        if (rva>=module_extent_ || size>module_extent_-rva)
+            throw std::runtime_error("Resolved native address exceeds the loaded module");
+        return base_+rva;
+    }
+    std::optional<UINT> original_native_rva(std::uintptr_t address) const {
+        if (address<base_ || address-base_>std::numeric_limits<UINT>::max()) return std::nullopt;
+        const auto rva=UINT(address-base_);
+        if (native_canonical_) return rva;
+        if (rva>=module_extent_) return std::nullopt;
+        return native_bindings_.original_rva(rva);
+    }
     std::size_t module_extent_=0;
     void** factory_iat_=nullptr;
     void* saved_factory_=nullptr;
@@ -644,9 +660,9 @@ class Runtime {
         D3DDEVICE_CREATION_PARAMETERS creation{};
         gpu_check(device.GetCreationParameters(&creation),"Locate owned menu input window");
         menu_window_=creation.hFocusWindow;
-        if (!test_ && desktop_cursor_)
+        if (desktop_cursor_)
             window_cursor_=std::make_unique<OutlastWindowCursor>(menu_window_,*desktop_cursor_,
-                &focused_cursor_client,&settings_open);
+                &focused_cursor_client,&settings_open,&settings_key);
         variants_=std::make_unique<D3D9ShaderVariants>(device,config_.comfort.hit_distortion);
         variants_->effects(config_.comfort.bloom,config_.comfort.film_grain);
         gpu_profile_=std::make_unique<D3D9FrameProfile>(device);
@@ -663,15 +679,12 @@ class Runtime {
     }
     EyePose relative_pose(EyePose pose) const {return comfort_.pose(recenter_.relative(pose));}
     static bool WINAPI settings_open() {return self().settings_.captures_input();}
+    static bool WINAPI settings_key(UINT message,WPARAM key,LPARAM bits) {
+        return guarded([&] {return self().settings_.message(message,key,bits);});
+    }
     void poll_settings() {
-        if (test_ || headless_probe) return;
-        DWORD foreground=0;
-        GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
-        const int codes[]{VK_F10,VK_ESCAPE,VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT,VK_RETURN};
-        std::array<bool,7> down{};
-        for (unsigned i=0;i<down.size();++i) down[i]=(GetAsyncKeyState(codes[i])&0x8000)!=0;
         const bool previous=settings_.visible();
-        settings_.keyboard(down,foreground==GetCurrentProcessId());
+        settings_.poll_messages();
         if (previous!=settings_.visible()) {
             settings_anchor_.reset();
             settings_hand_=config_.comfort.primary_hand();
@@ -683,7 +696,7 @@ class Runtime {
                 settings_.enabled(OutlastSettingsMenu::film_grain));
         }
     }
-    void compose_settings() {
+    void compose_settings(IDirect3DSurface9& output,UINT width,UINT height) {
         if (!settings_.visible()) return;
         const auto eyes=settings_anchor_.locate(tracked_,fovs_,1);
         const auto frame=xr().motion_frame();
@@ -706,7 +719,7 @@ class Runtime {
         GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
         const bool mouse_focus=!test_ && foreground==GetCurrentProcessId();
         if (mouse_focus && GetCursorPos(&cursor) && desktop_mirror_) {
-            const auto point=desktop_mirror_->pointer(cursor,width_,height_);
+            const auto point=desktop_mirror_->pointer(cursor,width,height);
             if (point) {
                 const auto& fov=fovs_[0];
                 const float u=(*point)[0],v=(*point)[1];
@@ -736,13 +749,14 @@ class Runtime {
             settings_revision_=settings_.revision();
         }
         if (!panel_renderer_) panel_renderer_=std::make_unique<D3D9WorldPanel>(*device_.get());
-        panel_renderer_->draw_overlay(*settings_texture_.get(),*final_surface_.get(),width_,height_,eyes);
+        panel_renderer_->draw_overlay(*settings_texture_.get(),output,width,height,eyes);
+        ++stats_.settings_draws;
         if (controller_hit) {
             const TrackingFrame identity{{0,0,0},{1,0,0},{0,1,0},{0,0,1},1,{0,0,0}};
             StereoViewConstants views{};
             for (unsigned eye=0;eye<2;++eye)
                 views[eye]=eye_constants(identity,tracked_[eye],fovs_[eye],.01f,1000);
-            panel_renderer_->draw_pointer(*final_surface_.get(),width_,height_,views,aim.position,
+            panel_renderer_->draw_pointer(output,width,height,views,aim.position,
                 controller_hit->point,true);
         }
     }
@@ -1279,7 +1293,7 @@ class Runtime {
     }
     static void close_camera_hud_movie(void* movie) {
         auto& r=self();
-        if (!movie || !r.bone_name_ || field<std::uintptr_t>(movie,0)!=r.base_+0x1ad8290)
+        if (!movie || !r.bone_name_ || field<std::uintptr_t>(movie,0)!=r.native_address(0x1ad8290))
             throw std::runtime_error("Cannot close an unadmitted native camera HUD movie");
         UINT64 name=0;r.bone_name_(&name,L"Close",1);
         auto* function=r.find_script_function_(movie,name,0);
@@ -1293,7 +1307,7 @@ class Runtime {
             auto& r=self();
             if (!r.camcorder_capture_) {r.original_camera_hud_(hud);return;}
             auto* movie=field<void*>(hud,0x7ac);
-            if (!movie || field<std::uintptr_t>(movie,0)!=r.base_+0x1ad8290)
+            if (!movie || field<std::uintptr_t>(movie,0)!=r.native_address(0x1ad8290))
                 throw std::runtime_error("Physical camera HUD does not match the admitted retail movie");
             r.camcorder_capture_->bind_hud(movie);
             r.original_camera_hud_(hud);
@@ -1332,8 +1346,8 @@ class Runtime {
             auto* selected=texture;
             if (r.capture_finish_view_ && field<UINT>(r.capture_finish_view_,0x52c) &&
                 field<USHORT>(parameter,2) && !field<USHORT>(parameter,0) && !offset &&
-                texture==*reinterpret_cast<void**>(r.base_+0x20119d8)) {
-                selected=*reinterpret_cast<void**>(r.base_+0x2011c08);
+                texture==*reinterpret_cast<void**>(r.native_address(0x20119d8,8))) {
+                selected=*reinterpret_cast<void**>(r.native_address(0x2011c08,8));
                 if (!selected || selected==texture)
                     throw std::runtime_error("Completed native camera LDR output is unavailable");
                 r.capture_finish_ldr_source_=true;
@@ -1343,8 +1357,8 @@ class Runtime {
                     <<",\"view\":"<<reinterpret_cast<std::uintptr_t>(r.capture_finish_view_)
                     <<",\"texture\":"<<reinterpret_cast<std::uintptr_t>(texture)
                     <<",\"selected_texture\":"<<reinterpret_cast<std::uintptr_t>(selected)
-                    <<",\"native_hdr\":"<<*reinterpret_cast<std::uintptr_t*>(r.base_+0x20119d8)
-                    <<",\"native_ldr\":"<<*reinterpret_cast<std::uintptr_t*>(r.base_+0x2011c08)
+                    <<",\"native_hdr\":"<<*reinterpret_cast<std::uintptr_t*>(r.native_address(0x20119d8,8))
+                    <<",\"native_ldr\":"<<*reinterpret_cast<std::uintptr_t*>(r.native_address(0x2011c08,8))
                     <<",\"register\":"<<field<USHORT>(parameter,0)<<"}\n";
                 r.native_postprocess_dispatch_.flush();
                 if (!r.native_postprocess_dispatch_) throw std::runtime_error("Cannot retain native final-copy source");
@@ -1354,7 +1368,7 @@ class Runtime {
                 r.camcorder_resolve_probe_->needs_raw_source(UINT(r.stats_.frames)) &&
                 r.capture_postprocess_scope_ && r.owned_camera_view() && render_->current &&
                 field<USHORT>(parameter,2) && field<USHORT>(parameter,0)<16 && !offset &&
-                texture==*reinterpret_cast<void**>(r.base_+0x20119d8)) {
+                texture==*reinterpret_cast<void**>(r.native_address(0x20119d8,8))) {
                 Internal internal;
                 Com<IDirect3DPixelShader9> pixel;
                 gpu_check(r.device_->GetPixelShader(pixel.put()),"Identify native raw-optics source shader");
@@ -1568,7 +1582,7 @@ class Runtime {
                 gpu_check(actual->GetFunction(code.data(),&bytes),"Read actual native bound shader program");
                 if (bytes!=expected) throw std::runtime_error("Actual native bound shader extent changed");
                 if (r.draw_probe_) r.draw_probe_->retain_bound_shaders(*r.device_.get(),r.stats_.frames);
-                auto* rhi=*reinterpret_cast<void**>(r.base_+0x1ffb0b0);
+                auto* rhi=*reinterpret_cast<void**>(r.native_address(0x1ffb0b0,8));
                 auto* methods=field<BYTE*>(rhi,0);
                 const auto requested=pixel?field<std::uintptr_t>(pixel,0x4c):0;
                 auto* expected_pixel=requested?reinterpret_cast<IDirect3DPixelShader9*>(requested-8):nullptr;
@@ -2473,7 +2487,7 @@ class Runtime {
         return guarded([&] {
             auto& r=self();
             const INT actual=r.original_viewport_focus_(viewport);
-            const bool joystick=native_input_poll_ && caller==r.base_+0xc47aed;
+            const bool joystick=native_input_poll_ && caller==r.base_+r.native_rva(0xc47aed);
             const auto clock=r.input_clock();
             const auto frame=joystick?r.motion_controls_.sample(clock):MotionFrame{};
             INT result=actual;
@@ -2918,7 +2932,7 @@ class Runtime {
     }
     void refresh_native_menu_state() {
         if (test_) return;
-        const auto* engine=field<const void*>(reinterpret_cast<const void*>(base_),0x201b8e0);
+        const auto* engine=field<const void*>(reinterpret_cast<const void*>(base_),native_rva(0x201b8e0));
         const auto count=engine?field<INT>(engine,0x44):0;
         if (count<0 || count>16 || (count && !field<const void*>(engine,0x3c)))
             throw std::runtime_error("Invalid native focused movie inventory");
@@ -2932,7 +2946,7 @@ class Runtime {
     }
     void native_menu_cursor(bool pointer) {
         if (test_ || (!pointer && !software_cursor_.pending())) return;
-        const auto* engine=field<const void*>(reinterpret_cast<const void*>(base_),0x201b8e0);
+        const auto* engine=field<const void*>(reinterpret_cast<const void*>(base_),native_rva(0x201b8e0));
         const auto count=engine?field<INT>(engine,0x24):0;
         const auto records=engine?field<void**>(engine,0x1c):nullptr;
         if (count<0 || count>256 || (count && !records))
@@ -2962,8 +2976,8 @@ class Runtime {
         if (edges.empty() && menu_native_position_ && point &&
             menu_native_position_->x==point->x && menu_native_position_->y==point->y) return;
         const auto* image=reinterpret_cast<const void*>(base_);
-        const auto count=field<INT>(image,0x201e378);
-        const auto viewports=field<void**>(image,0x201e370);
+        const auto count=field<INT>(image,native_rva(0x201e378));
+        const auto viewports=field<void**>(image,native_rva(0x201e370));
         if (count<0 || count>16 || (count && !viewports))
             throw std::runtime_error("Invalid native menu viewport inventory");
         void* selected=nullptr;
@@ -2977,10 +2991,10 @@ class Runtime {
         if (!client) throw std::runtime_error("Tracked menu lost its native input client");
         const auto axis=entry<MenuAxisEntry>(client,7);
         const auto key=entry<MenuKeyEntry>(client,5);
-        if (reinterpret_cast<std::uintptr_t>(axis)!=base_+0x61f840 ||
-            reinterpret_cast<std::uintptr_t>(key)!=base_+0xcc76e0)
+        if (reinterpret_cast<std::uintptr_t>(axis)!=native_address(0x61f840) ||
+            reinterpret_cast<std::uintptr_t>(key)!=native_address(0xcc76e0))
             throw std::runtime_error("Tracked menu has an unexpected retail input dispatcher");
-        const auto* engine=probe_menu_fixture_?field<const void*>(image,0x201b8e0):nullptr;
+        const auto* engine=probe_menu_fixture_?field<const void*>(image,native_rva(0x201b8e0)):nullptr;
         const auto dispatch=[&](POINT position,std::optional<bool> down) {
             struct PositionScope {
                 std::optional<POINT> previous=menu_dispatch_position_;
@@ -2989,7 +3003,7 @@ class Runtime {
             } position_scope(position);
             const auto before=engine?field<POINT>(engine,0x208):POINT{-1,-1};
             // Bypass the Win32 mouse path, whose SetFocus can reset a queued release.
-            axis(client,static_cast<BYTE*>(selected)+8,0,field<UINT64>(image,0x20086d8),0,elapsed,0);
+            axis(client,static_cast<BYTE*>(selected)+8,0,field<UINT64>(image,native_rva(0x20086d8)),0,elapsed,0);
             menu_native_position_=position;
             const auto after=engine?field<POINT>(engine,0x208):POINT{-1,-1};
             if (probe_menu_fixture_) {
@@ -3003,7 +3017,7 @@ class Runtime {
             if (down) {
                 const INT event=*down?0:1;
                 const auto handled=key(client,static_cast<BYTE*>(selected)+8,0,
-                    field<UINT64>(image,0x20086f8),event,1.f,0);
+                    field<UINT64>(image,native_rva(0x20086f8)),event,1.f,0);
                 if (!handled) log("Native controller menu edge was not consumed; event="+std::to_string(event));
                 if (probe_menu_fixture_) {
                     const auto cursor=engine?field<POINT>(engine,0x208):POINT{-1,-1};
@@ -3065,7 +3079,7 @@ class Runtime {
                         throw std::runtime_error("Cannot clear the probe-owned window focus for the explicit negative-focus fixture");
                 }
             }
-            const auto mouse=field<void*>(reinterpret_cast<const void*>(r.base_),0x201e218);
+            const auto mouse=field<void*>(reinterpret_cast<const void*>(r.base_),r.native_rva(0x201e218));
             if (mouse && !r.probe_mouse_) {
                 GraphicsScope graphics(r);
                 r.com_hook(mouse,10,&probe_mouse_data);
@@ -3144,7 +3158,7 @@ class Runtime {
                                     INT event,float amount,INT gamepad) {
         return guarded([&] {
             auto& r=self();
-            const bool left=key==field<UINT64>(reinterpret_cast<const void*>(r.base_),0x20086f8);
+            const bool left=key==field<UINT64>(reinterpret_cast<const void*>(r.base_),r.native_rva(0x20086f8));
             std::uintptr_t global_key=0,global_gate=0;
             std::vector<std::uintptr_t> interactions;
             if (left) {
@@ -3154,7 +3168,7 @@ class Runtime {
                         throw std::runtime_error("Native interaction callback lies outside the verified retail image");
                     return address-r.base_;
                 };
-                if (auto* global=field<BYTE*>(reinterpret_cast<const void*>(r.base_),0x201ebc0)) {
+                if (auto* global=field<BYTE*>(reinterpret_cast<const void*>(r.base_),r.native_rva(0x201ebc0))) {
                     global_key=callback_rva(global+8,5);
                     global_gate=callback_rva(global,8);
                 }
@@ -3389,7 +3403,7 @@ class Runtime {
         guarded([&] {auto& r=self();
             bool panel=false;
             if (!r.test_) {
-                const auto* world=field<const void*>(reinterpret_cast<const void*>(r.base_),0x200b5a8);
+                const auto* world=field<const void*>(reinterpret_cast<const void*>(r.base_),r.native_rva(0x200b5a8));
                 if (!world || field<int>(world,0x78)==0) panel=true;
                 else {
                     const bool menu=r.menu_state_()!=0;
@@ -3566,13 +3580,14 @@ class Runtime {
     static void* WINAPI texture(void* out,UINT w,UINT h,BYTE format,UINT mips,UINT flags,std::uintptr_t data) {
         const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);OutlastTargetRole role=OutlastTargetRole::shared;
-            const bool known=caller>=r.base_ && outlast_allocation_role(caller-r.base_,role);
+            const auto source_caller=r.original_native_rva(caller);
+            const bool known=source_caller && outlast_allocation_role(*source_caller,role);
             Allocation next{role,w,h};auto* previous=allocation_;
             if (known && stereo_target(role)) allocation_=&next;
             Com<IDirect3DTexture9> created;
             auto* previous_created=probe_created_texture_;
             const bool lens_allocation=(r.camcorder_probe_ || r.camcorder_capture_) && w==512 && h==288 &&
-                caller>=r.base_+0x2fa4f0 && caller<r.base_+0x2fa7a0;
+                source_caller && *source_caller>=0x2fa4f0 && *source_caller<0x2fa7a0;
             if (lens_allocation) probe_created_texture_=&created;
             struct RestoreCreated {
                 Com<IDirect3DTexture9>* previous;
@@ -3593,7 +3608,8 @@ class Runtime {
         const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);auto* previous=allocation_;
             Allocation next{OutlastTargetRole::shared,w,h};
-            const bool known=caller>=r.base_ && outlast_allocation_role(caller-r.base_,next.role);
+            const auto source_caller=r.original_native_rva(caller);
+            const bool known=source_caller && outlast_allocation_role(*source_caller,next.role);
             const auto found=r.native_textures_.find(tex);
             if (found!=r.native_textures_.end()) {
                 if (known && next.role!=found->second.role)
@@ -4075,6 +4091,7 @@ class Runtime {
             if (loading)
                 gpu_check(d->ColorFill(r.final_surface_.get(),nullptr,0xff000000),
                     "Black out the native loading movie in both eyes and desktop mirror");
+            bool settings_composed=false;
             if (r.frame_open_) {
                 if (r.present_panel_!=r.last_present_panel_) {
                     if (r.present_panel_) r.panel_anchor_.reset();
@@ -4088,7 +4105,6 @@ class Runtime {
                         r.comfort_filter_=std::make_unique<D3D9ComfortFilter>(*d);
                     r.comfort_filter_->draw(*r.final_surface_.get(),r.vignette_strength_);
                 }
-                if (!loading) r.compose_settings();
                 const bool direct=!r.present_panel_ && r.width_==r.xr().width() && r.height_==r.xr().height();
                 if (!direct && !r.submission_.get()) {
                     gpu_check(d->CreateTexture(r.xr().width()*2,r.xr().height(),1,D3DUSAGE_RENDERTARGET,
@@ -4105,7 +4121,7 @@ class Runtime {
                     r.panel_renderer_->draw(*r.final_.get(),*r.submission_surface_.get(),
                         r.xr().width(),r.xr().height(),
                         r.panel_anchor_.locate(r.tracked_,r.fovs_,float(r.width_)/r.height_));
-                    r.controller_menu_pointer(true,r.submission_surface_.get());
+                    r.controller_menu_pointer(!r.settings_.captures_input(),r.submission_surface_.get());
                     ++r.stats_.geometry_draws;
                     ++r.stats_.world_panel_draws;
                 } else {
@@ -4117,9 +4133,12 @@ class Runtime {
                     }
                     if (r.menu_overlay_ && !r.panel_renderer_)
                         r.panel_renderer_=std::make_unique<D3D9WorldPanel>(*d);
-                    r.controller_menu_pointer(r.menu_overlay_,
+                    r.controller_menu_pointer(r.menu_overlay_ && !r.settings_.captures_input(),
                         r.menu_overlay_?(direct?r.final_surface_.get():r.submission_surface_.get()):nullptr);
                 }
+                if (!loading) r.compose_settings(direct?*r.final_surface_.get():*r.submission_surface_.get(),
+                    r.xr().width(),r.xr().height());
+                settings_composed=!loading && r.settings_.visible();
                 if (r.gpu_profile_) {
                     r.gpu_profile_->end();
                     r.stats_.gpu_timing_status=r.gpu_profile_->status;
@@ -4136,20 +4155,25 @@ class Runtime {
                 if (direct) ++r.stats_.direct_xr_submissions;
                 r.frame_open_=false;++r.stats_.submitted;
             }
-            const RECT left{0,0,LONG(r.width_),LONG(r.height_)};
+            const bool settings_submission=settings_composed && (r.present_panel_ ||
+                r.width_!=r.xr().width() || r.height_!=r.xr().height());
+            auto* mirror_source=settings_submission?r.submission_surface_.get():r.final_surface_.get();
+            const UINT mirror_width=settings_composed?r.xr().width():r.width_;
+            const UINT mirror_height=settings_composed?r.xr().height():r.height_;
+            const RECT left{0,0,LONG(mirror_width),LONG(mirror_height)};
             Com<IDirect3DSurface9> desktop;
             gpu_check(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,desktop.put()),
                 "Acquire current native desktop backbuffer");
-            gpu_check(d->StretchRect(r.final_surface_.get(),&left,desktop.get(),nullptr,D3DTEXF_LINEAR),
+            gpu_check(d->StretchRect(mirror_source,&left,desktop.get(),nullptr,D3DTEXF_LINEAR),
                 "Mirror native left eye to the current desktop");
             if (r.desktop_mirror_observer_)
-                r.desktop_mirror_observer_(d,r.final_surface_.get(),desktop.get());
+                r.desktop_mirror_observer_(d,mirror_source,desktop.get());
             if (!r.test_ && (!headless_probe || r.probe_desktop_mirror_)) {
                 if (!r.desktop_mirror_) {
-                    r.desktop_mirror_=std::make_unique<OutlastDesktopMirror>();
+                    r.desktop_mirror_=std::make_unique<OutlastDesktopMirror>(&settings_key);
                     log("Visible desktop mirror: Outlast VR - Desktop; independent DXGI window/swapchain; final left eye only");
                 }
-                const bool shown=r.desktop_mirror_->present(*d,*r.final_surface_.get(),r.width_,r.height_);
+                const bool shown=r.desktop_mirror_->present(*d,*mirror_source,mirror_width,mirror_height);
                 if (r.window_cursor_) r.window_cursor_->park_native_desktop();
                 if (r.stats_.frames<3 || r.stats_.frames%300==0)
                     log("Desktop mirror frame="+std::to_string(r.stats_.frames)+
@@ -4260,11 +4284,10 @@ class Runtime {
         }
     }
     template<class F> F retail_entry(const OutlastNativeImage& image,UINT rva) {
-        const auto expected=image.body(rva,16);
-        auto* loaded=reinterpret_cast<unsigned char*>(base_+rva);
-        if (rva>=module_extent_ || module_extent_-rva<expected.size() ||
-            std::memcmp(loaded,expected.data(),expected.size())!=0)
-            throw std::runtime_error("Native hook prologue differs from the exact retail image");
+        const auto expected=image.loaded_body(rva,16,base_);
+        auto* loaded=reinterpret_cast<unsigned char*>(native_address(rva,expected.size()));
+        if (std::memcmp(loaded,expected.data(),expected.size())!=0)
+            throw std::runtime_error("Native hook prologue differs from the validated executable");
         return reinterpret_cast<F>(loaded);
     }
     template<class F> void patch_input_import(void** slot,F replacement,F& original) {
@@ -4339,6 +4362,7 @@ class Runtime {
     }
 public:
     explicit Runtime(const RuntimeTestConfiguration* test) {
+        std::optional<OutlastNativeImage> native_image;
         if (instance_) throw std::logic_error("Runtime is already initialized");
         base_=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
         auto* dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base_);
@@ -4350,7 +4374,7 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=17 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=18 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;
@@ -4359,7 +4383,11 @@ public:
             motion_controls_.configure(config_.comfort);
             test_xr_=std::make_unique<OpenXRStereoSession>(test->xr_resolve);
         } else {
-            OutlastNativeImage image(module_path(nullptr));
+            native_image.emplace(module_path(nullptr));
+            const auto& image=*native_image;
+            native_canonical_=image.canonical();
+            native_bindings_=image.bindings();
+            log("Validated native ABI "+std::string(image.profile())+"; executable SHA256="+image.digest());
             const auto mod_directory=module_path(own_module).parent_path();
             config_=load_outlast_config(mod_directory);
             settings_.configure(config_);
@@ -4557,11 +4585,10 @@ public:
             desktop_cursor_.emplace(base_,module_extent_);
             if (test_) bind_native(test->bindings);
             else {
-                OutlastNativeImage image(module_path(nullptr));
+                const auto& image=*native_image;
                 RuntimeBindings b{};
                 if (recommended_render_size_) {
-                    if (module_extent_<0x2006f08)
-                        throw std::runtime_error("Recovered native engine pointer lies outside the exact retail image");
+                    native_address(0x2006f00,8);
                     hooks_->add(retail_entry<ResizeFrameEntry>(image,0xc461f0),&resize_frame,original_resize_frame_);
                     hooks_->add(retail_entry<ResizeRHIEntry>(image,0xc44350),&resize_rhi,original_resize_rhi_);
                     log("Engine viewport follows OpenXR recommended eye extent: "+
@@ -4636,8 +4663,8 @@ public:
                     bindings.close_movie=&close_camera_hud_movie;
                     bindings.set_scale=retail_entry<NativeCamcorderProbeBindings::SetScale>(image,0xb732a0);
                     bindings.get_scale=retail_entry<NativeCamcorderProbeBindings::GetScale>(image,0xeaa3a0);
-                    bindings.errors=reinterpret_cast<void**>(base_+0x1ec1dd0);
-                    bindings.engine=reinterpret_cast<void**>(base_+0x2020f38);
+                    bindings.errors=reinterpret_cast<void**>(native_address(0x1ec1dd0,8));
+                    bindings.engine=reinterpret_cast<void**>(native_address(0x2020f38,8));
                     wchar_t night_vision[8]{};
                     const auto nv_length=GetEnvironmentVariableW(L"OLVR_PROBE_CAMCORDER_NV",night_vision,UINT(std::size(night_vision)));
                     if (nv_length && (nv_length!=1 || night_vision[0]!=L'1'))
@@ -4743,9 +4770,7 @@ public:
                         &collect_garbage,original_collect_garbage_);
                 }
                 if (!physical_camcorder && motion_enabled_) {
-                    if (module_extent_<0x2020f40)
-                        throw std::runtime_error("Retail night-vision engine lies outside the exact image");
-                    camcorder_engine_=reinterpret_cast<void**>(base_+0x2020f38);
+                    camcorder_engine_=reinterpret_cast<void**>(native_address(0x2020f38,8));
                     original_nv_effect_=retail_entry<CamcorderNV>(image,0xd5b010);
                     enable_camera_component_=retail_entry<CamcorderEnable>(image,0x1d8570);
                     normal_camera_effect_=retail_entry<CamcorderLower>(image,0xd5b350);
@@ -4770,26 +4795,18 @@ public:
                     complete_pickup_=retail_entry<OutlastPickupComplete>(image,0xd8ce40);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xce8f10),&native_pickup,original_pickup_);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xd7b300),&native_use_volume,original_use_volume_);
-                    if (module_extent_<0x200b5b0)
-                        throw std::runtime_error("Recovered collision world lies outside the exact retail image");
-                    native_world_=reinterpret_cast<void**>(base_+0x200b5a8);
+                    native_world_=reinterpret_cast<void**>(native_address(0x200b5a8,8));
                     b.native_world=native_world_;
                     b.input_tick=retail_entry<InputTickEntry>(image,0xc4cf90);
                     b.gamepad_state=retail_entry<GamepadStateEntry>(image,0xe6b4ac);
                     b.gamepad_vibration=retail_entry<GamepadVibrationEntry>(image,0xe6b4a6);
                     b.viewport_focus=retail_entry<ViewportFocusEntry>(image,0xc427e0);
-                    if (module_extent_<0x201e31c)
-                        throw std::runtime_error("Native gamepad globals lie outside the exact retail image");
-                    b.gamepads=reinterpret_cast<void**>(base_+0x201e310);
-                    b.gamepad_count=reinterpret_cast<INT*>(base_+0x201e318);
+                    b.gamepads=reinterpret_cast<void**>(native_address(0x201e310,8));
+                    b.gamepad_count=reinterpret_cast<INT*>(native_address(0x201e318,4));
                 }
                 menu_state_=retail_entry<MenuStateEntry>(image,0xd14e90);
-                if (module_extent_<0x201ebc8)
-                    throw std::runtime_error("Native movie-player global lies outside the exact retail image");
-                b.movie_player=reinterpret_cast<void**>(base_+0x201ebc0);
-                if (module_extent_<0x2020f40)
-                    throw std::runtime_error("Native pacing engine lies outside the exact retail image");
-                b.frame_rate_engine=reinterpret_cast<void**>(base_+0x2020f38);
+                b.movie_player=reinterpret_cast<void**>(native_address(0x201ebc0,8));
+                b.frame_rate_engine=reinterpret_cast<void**>(native_address(0x2020f38,8));
                 b.input_tick=retail_entry<InputTickEntry>(image,0xc4cf90);
                 bind_native(b);
                 if (motion_enabled_ || probe_skeleton_.is_open()) {
@@ -4809,8 +4826,8 @@ public:
                         if (!address) throw std::runtime_error("Headless menu confirmation lacks its versioned startup source");
                         static_assert(sizeof(probe_startup_pad_)==sizeof(address));
                         std::memcpy(&probe_startup_pad_,&address,sizeof(address));
-                        gamepads_=reinterpret_cast<void**>(base_+0x201e310);
-                        gamepad_count_=reinterpret_cast<INT*>(base_+0x201e318);
+                        gamepads_=reinterpret_cast<void**>(native_address(0x201e310,8));
+                        gamepad_count_=reinterpret_cast<INT*>(native_address(0x201e318,4));
                         hooks_->add(retail_entry<GamepadStateEntry>(image,0xe6b4ac),
                             &gamepad_state,original_gamepad_state_);
                     }
@@ -4826,10 +4843,9 @@ public:
                 }
                 const UINT offsets[]{0x1e09e58,0x1e09e64,0x1e0a234};
                 for (unsigned i=0;i<3;++i) {
-                    if (offsets[i]>module_extent_-4) throw std::runtime_error("Native policy lies outside the exact image");
-                    saved_policy_[i]=field<UINT>(reinterpret_cast<void*>(base_),offsets[i]);
+                    saved_policy_[i]=field<UINT>(reinterpret_cast<void*>(base_),native_rva(offsets[i]));
                 }
-                for (const auto offset:offsets) {const UINT disabled=0;std::memcpy(reinterpret_cast<void*>(base_+offset),&disabled,4);}
+                for (const auto offset:offsets) {const UINT disabled=0;std::memcpy(reinterpret_cast<void*>(native_address(offset,4)),&disabled,4);}
                 policies_=true;
             }
             com_hook(xr().graphics().get(),16,&create_device);
@@ -4842,7 +4858,7 @@ public:
             com_hook(xr().graphics().get(),14,&adapter_caps);com_hook(xr().graphics().get(),15,&adapter_monitor);
             hooks_->enable_pending();
             if (!test_) patch_factory_import();
-            stats_.initialized=1;log("Exact-build native renderer hooks initialized; no dual-eye geometry replay");
+            stats_.initialized=1;log("Validated native renderer hooks initialized; no dual-eye geometry replay");
             if (!test_) {
                 render_heartbeat_=input_heartbeat_=GetTickCount64();
                 if (!CreateTimerQueueTimer(&watchdog_,nullptr,&watch_progress,this,5000,5000,WT_EXECUTEDEFAULT))
@@ -4858,7 +4874,7 @@ public:
             }
             if (policies_) {
                 const UINT offsets[]{0x1e09e58,0x1e09e64,0x1e0a234};
-                for (unsigned i=0;i<3;++i) std::memcpy(reinterpret_cast<void*>(base_+offsets[i]),&saved_policy_[i],4);
+                for (unsigned i=0;i<3;++i) std::memcpy(reinterpret_cast<void*>(native_address(offsets[i],4)),&saved_policy_[i],4);
             }
             instance_=nullptr;throw;
         }
@@ -4881,7 +4897,7 @@ public:
         hooks_.reset();
         if (policies_) {
             const UINT offsets[]{0x1e09e58,0x1e09e64,0x1e0a234};
-            for (unsigned i=0;i<3;++i) std::memcpy(reinterpret_cast<void*>(base_+offsets[i]),&saved_policy_[i],4);
+            for (unsigned i=0;i<3;++i) std::memcpy(reinterpret_cast<void*>(native_address(offsets[i],4)),&saved_policy_[i],4);
         }
         capture_gamma_shader_.reset();
         desktop_mirror_.reset();
@@ -4910,7 +4926,7 @@ public:
         return parameters.hFocusWindow;
     }
     bool render_extent(void* viewport,UINT& width,UINT& height) {
-        const auto engine=field<void*>(reinterpret_cast<void*>(base_),0x2006f00);
+        const auto engine=field<void*>(reinterpret_cast<void*>(base_),native_rva(0x2006f00));
         const auto game_viewport=engine?field<void*>(engine,0x6f4):nullptr;
         return outlast_render_size(field<void*>(viewport,0x4c),game_viewport,width,height,xr().width(),xr().height());
     }

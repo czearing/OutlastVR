@@ -7,8 +7,12 @@ OpenXR loader without launching the game.
 
 - **Game not found:** extract beside `Binaries\Win64\OLGame.exe`, or set
   `game.executable` in [settings](settings.md).
-- **Unsupported executable:** compare your game build with
-  [compatibility](compatibility.md). Do not bypass the version check.
+- **Native ABI mismatch:** the error identifies the section or PE directory that
+  differs from the validated layout, or the unresolved/conflicting native
+  contract when address discovery cannot safely bind it. See [compatibility](compatibility.md) and
+  include that diagnostic and your executable SHA-256 in a report. A different
+  whole-file hash alone is not a rejection. Unrelated code changes and moved
+  functions can work; changed required layouts need validated contracts.
 - **Loader or runtime error:** extract every file from the release ZIP and set
   your headset software as the active OpenXR runtime. Start it before the mod.
 - **Invalid setting:** use the key, type and range shown in the error and the
