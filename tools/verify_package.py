@@ -23,7 +23,7 @@ def verify(folder):
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8-sig"))
     if manifest["physical_camcorder_default"] is not False:
         raise ValueError("Physical camcorder must be opt-in")
-    expected = {"OutlastVRLauncher.exe", "OutlastVRSinglePass.dll", "openxr_loader.dll",
+    expected = {"OutlastVRLauncher.exe", "OutlastVRSinglePass.dll", "d3d9.dll", "openxr_loader.dll",
                 "OutlastVR.ini", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
                 "licenses/MinHook.txt", "licenses/OpenXR.txt", "licenses/OpenXR-MIT.txt", "licenses/JsonCpp.txt",
                 "licenses/Winpthreads.txt"}
@@ -46,9 +46,11 @@ def verify(folder):
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.FreeLibrary.argtypes = [wintypes.HMODULE]
     kernel.FreeLibrary.restype = wintypes.BOOL
-    for name in ("openxr_loader.dll", "OutlastVRSinglePass.dll"):
+    for name in ("openxr_loader.dll", "OutlastVRSinglePass.dll", "d3d9.dll"):
         library = ctypes.WinDLL(str(folder / name), winmode=0x100 | 0x800)
-        export = "xrGetInstanceProcAddr" if name == "openxr_loader.dll" else "OutlastVR_Initialize"
+        export = {"openxr_loader.dll": "xrGetInstanceProcAddr",
+                  "OutlastVRSinglePass.dll": "OutlastVR_Initialize",
+                  "d3d9.dll": "Direct3DCreate9"}[name]
         try:
             getattr(library, export)
         finally:

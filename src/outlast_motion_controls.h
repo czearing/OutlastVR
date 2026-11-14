@@ -29,6 +29,7 @@ class OutlastMotionControls {
     UINT64 recenter_started_=0;
     std::optional<float> movement_yaw_=0.f;
     bool sprint_down_=false,sprinting_=false,sprint_blocked_=true;
+    WORD settings_blocked_buttons_=0;
     static SHORT axis(float value) {
         return SHORT(std::lround(value*(value<0?32768.f:32767.f)));
     }
@@ -180,9 +181,12 @@ public:
     }
     DWORD state(DWORD index,XINPUT_STATE* output,DWORD physical_result,
                 const XINPUT_STATE& physical,UINT64 now,bool menu_pointer=false,bool use_ready=true,
-                bool native_night_vision=true) {
+                bool native_night_vision=true,bool settings_open=false) {
         if (index!=0) {
-            if (output && physical_result==ERROR_SUCCESS) *output=physical;
+            if (output && physical_result==ERROR_SUCCESS) {
+                *output=physical;
+                if (settings_open) output->Gamepad={};
+            }
             return physical_result;
         }
         if (!output) return ERROR_BAD_ARGUMENTS;
@@ -190,14 +194,22 @@ public:
             return physical_result;
         std::lock_guard<std::mutex> lock(mutex_);
         // A suppressed or interrupted press must be released before gameplay can own it.
-        if (menu_pointer) {
+        if (menu_pointer || settings_open) {
             sprinting_=false;sprint_blocked_=true;
             stance_eligible_=false;cancel_stance_pulse();
         }
-        if ((menu_pointer || !use_ready) && use_) use_blocked_=true;
+        if ((menu_pointer || settings_open || !use_ready) && use_) use_blocked_=true;
+        if (settings_open) {
+            settings_blocked_buttons_|=physical.Gamepad.wButtons;
+            manual_pulse_=false;
+        }
+        settings_blocked_buttons_&=physical.Gamepad.wButtons;
         XINPUT_STATE result{};
-        if (physical_result==ERROR_SUCCESS) result=physical;
-        if (frame_.focused && now>=sampled_at_ && now-sampled_at_<=250000) {
+        if (!settings_open && physical_result==ERROR_SUCCESS) {
+            result=physical;
+            result.Gamepad.wButtons&=WORD(~settings_blocked_buttons_);
+        }
+        if (!settings_open && frame_.focused && now>=sampled_at_ && now-sampled_at_<=250000) {
             const auto& left=frame_.hands[1-options_.primary_hand()];
             const auto& right=frame_.hands[options_.primary_hand()];
             auto move=options_.left_handed?frame_.turn:frame_.move;

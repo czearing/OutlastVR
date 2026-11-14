@@ -48,6 +48,24 @@ the last still-fresh tracked pose. Camera-handoff fixtures resume with an animat
 bone pose, checking that it cannot replace the established neutral standing anchor.
 The canted-eye fixture independently checks native light direction while headset
 yaw/pitch changes and the body remains stationary.
+Every production fixture independently compares the actual desktop swapchain
+RGB pixels with the final left eye for all 20 presented frames.
+The desktop-window fixture additionally reads the composed Windows desktop,
+checks changing left-eye colors, parks the redundant native frame without
+hiding, minimizing or resizing it, and exercises spectator resize, reset and close.
+The native-door fixture checks the production admission hook calls the door actor
+without changing hero/camera bytes, preserves locked-door admission, and does not
+teleport the door. A negative control omits the hook and must fail.
+Live-effects GPU tests repeatedly toggle native-named bloom/grain channels on
+the same cache, in stereo and mono camera draws, while checking preserved
+depth-of-field settings, thresholds, movie time and restored caller constants.
+The settings overlay has an independent per-eye pixel oracle and preserves the
+world outside its bounds. Input tests include owned-window messages, physical
+gamepads and focus/held-action recovery.
+
+The full actual-rig body test additionally requires an authentic `.poses.bin`
+crouch corpus beside its hero fixture. The targeted body-follow test does not
+replace that corpus; a missing corpus is a failed full test, not a pass.
 
 ## Headset playtest
 
@@ -61,6 +79,17 @@ yaw/pitch changes and the body remains stationary.
   removal and controller reconnection. Include seated and left-handed modes.
 - Pick up notes, folders and batteries with both pickup settings. Confirm each
   inventory event occurs once and movement returns afterward.
+  Look away while gripping near the item; compare nearest-item selection,
+  both handedness modes, a full inventory and a hand extended through a wall.
+- Open F10 over gameplay and native menus. Change every effect while looking
+  at a representative scene, then test keyboard, mouse, XR trigger and physical
+  gamepad ownership. Close while holding an action, lose/regain focus and reset
+  graphics; no stale action should fire. Check desktop gameplay and panel pixels.
+- Crouch and stand repeatedly, physically and by button, during head translation.
+  Include sprint/vault transitions, interrupted stance animation and recentering.
+  The standing horizontal anchor must not jump; native vertical stance motion
+  must remain continuous. Check the visual body's small-glance deadzone and
+  catch-up without changing the configured movement reference.
 - Check doors, vaults, ladders and hiding. After leaving a locker, verify that
   enemies still animate, detect the player and resume their behavior.
   Sprint and vault repeatedly while turning the headset; check position during

@@ -6,7 +6,9 @@
 #include "outlast_locomotion_camera.h"
 #include "outlast_motion_controls.h"
 #include "outlast_comfort.h"
+#include "outlast_settings_menu.h"
 #include "outlast_native_use.h"
+#include "outlast_hand_pickup.h"
 #include "outlast_camcorder.h"
 #include "outlast_native_camcorder.h"
 #include "outlast_body_ik.h"
@@ -15,6 +17,7 @@
 #include "outlast_vr_hints.h"
 #include "outlast_menu_cursor.h"
 #include "outlast_desktop_cursor.h"
+#include "outlast_desktop_mirror.h"
 #include "outlast_focus_pause.h"
 #include "outlast_menu_state.h"
 #include "outlast_render_size.h"
@@ -189,6 +192,7 @@ class Runtime {
     };
     Com<IDirect3DDevice9> device_;
     Com<IDirect3DSurface9> desktop_,final_surface_,submission_surface_;
+    std::unique_ptr<OutlastDesktopMirror> desktop_mirror_;
     Com<IDirect3DTexture9> final_,submission_;
     std::unique_ptr<D3D9ShaderVariants> variants_;
     OutlastRecenter recenter_;
@@ -225,6 +229,14 @@ class Runtime {
     OutlastCamcorder camcorder_controls_;
     OutlastConfig config_;
     OutlastComfort comfort_;
+    OutlastBodyFollow body_follow_;
+    OutlastSettingsMenu settings_;
+    WorldPanel settings_anchor_;
+    Com<IDirect3DTexture9> settings_texture_;
+    unsigned settings_revision_=0;
+    unsigned settings_hand_=1;
+    ControllerMenuPress settings_press_;
+    void(WINAPI* desktop_mirror_observer_)(IDirect3DDevice9*,IDirect3DSurface9*,IDirect3DSurface9*)=nullptr;
     float vignette_strength_=0;
     OutlastNightVision night_vision_;
     bool night_effects_waiting_=false;
@@ -408,6 +420,10 @@ class Runtime {
         UINT64 clock;
     };
     std::optional<HeadFrame> head_frame_;
+    OutlastDoorFind original_door_find_=nullptr;
+    OutlastDoorAdmit original_door_admit_=nullptr;
+    OutlastDoorOpen door_open_=nullptr;
+    OutlastDoorContext door_context_=nullptr;
     OutlastNativeUseContext native_use_context_{};
     using NativeUseEntry=UINT64(WINAPI*)(void*,INT);
     NativeUseEntry original_pickup_=nullptr,original_use_volume_=nullptr;
@@ -439,13 +455,13 @@ class Runtime {
     std::recursive_mutex focus_pause_mutex_;
     enum class ProbeFocusPolicy { Legacy,Tracked,Control };
     ProbeFocusPolicy probe_focus_policy_=ProbeFocusPolicy::Legacy;
-    MouseDataEntry original_mouse_data_=nullptr;
     InputEnqueueEntry original_input_enqueue_=nullptr;
     KeyStateEntry original_key_state_=nullptr;
     NativeProbeKeys probe_keys_;
     std::atomic<void*> probe_mouse_{nullptr};
     std::atomic<UINT64> suppressed_mouse_records_{0};
     bool probe_desktop_unfocused_=false;
+    bool probe_desktop_mirror_=false;
     std::ofstream probe_input_events_;
     std::mutex probe_input_mutex_;
     std::unique_ptr<NativeDrawProbe> draw_probe_;
@@ -629,8 +645,10 @@ class Runtime {
         gpu_check(device.GetCreationParameters(&creation),"Locate owned menu input window");
         menu_window_=creation.hFocusWindow;
         if (!test_ && desktop_cursor_)
-            window_cursor_=std::make_unique<OutlastWindowCursor>(menu_window_,*desktop_cursor_,&focused_cursor_client);
+            window_cursor_=std::make_unique<OutlastWindowCursor>(menu_window_,*desktop_cursor_,
+                &focused_cursor_client,&settings_open);
         variants_=std::make_unique<D3D9ShaderVariants>(device,config_.comfort.hit_distortion);
+        variants_->effects(config_.comfort.bloom,config_.comfort.film_grain);
         gpu_profile_=std::make_unique<D3D9FrameProfile>(device);
         com_hook(&device,18,&backbuffer);com_hook(&device,37,&set_target);
         com_hook(&device,47,&set_viewport);com_hook(&device,48,&get_viewport);
@@ -644,6 +662,90 @@ class Runtime {
         ++stats_.devices;log("Native D3D9On12 device attached; single-pass atlas and real GPU XR transport enabled");
     }
     EyePose relative_pose(EyePose pose) const {return comfort_.pose(recenter_.relative(pose));}
+    static bool WINAPI settings_open() {return self().settings_.captures_input();}
+    void poll_settings() {
+        if (test_ || headless_probe) return;
+        DWORD foreground=0;
+        GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
+        const int codes[]{VK_F10,VK_ESCAPE,VK_UP,VK_DOWN,VK_LEFT,VK_RIGHT,VK_RETURN};
+        std::array<bool,7> down{};
+        for (unsigned i=0;i<down.size();++i) down[i]=(GetAsyncKeyState(codes[i])&0x8000)!=0;
+        const bool previous=settings_.visible();
+        settings_.keyboard(down,foreground==GetCurrentProcessId());
+        if (previous!=settings_.visible()) {
+            settings_anchor_.reset();
+            settings_hand_=config_.comfort.primary_hand();
+            settings_press_.select_hand(false,settings_hand_,{false,false},{0,0});
+        }
+        if (variants_) {
+            variants_->hit_distortion(settings_.enabled(OutlastSettingsMenu::hit_distortion));
+            variants_->effects(settings_.enabled(OutlastSettingsMenu::bloom),
+                settings_.enabled(OutlastSettingsMenu::film_grain));
+        }
+    }
+    void compose_settings() {
+        if (!settings_.visible()) return;
+        const auto eyes=settings_anchor_.locate(tracked_,fovs_,1);
+        const auto frame=xr().motion_frame();
+        const auto hand=settings_press_.select_hand(frame.focused,settings_hand_,
+            {frame.hands[0].aim_tracked,frame.hands[1].aim_tracked},
+            {frame.hands[0].trigger,frame.hands[1].trigger});
+        settings_hand_=hand;
+        const auto& p=frame.hands[hand].aim;
+        const auto aim=relative_pose({{p.position.x,p.position.y,p.position.z},
+            {p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w}});
+        std::optional<WorldPanelHit> controller_hit,mouse_hit;
+        if (frame.focused && frame.hands[hand].aim_tracked)
+            controller_hit=settings_anchor_.intersect(aim);
+        settings_.point(controller_hit?controller_hit->u:-1,controller_hit?controller_hit->v:-1,
+            settings_press_.update(frame.focused && frame.hands[hand].aim_tracked,
+                controller_hit.has_value(),hand,frame.hands[hand].trigger),true,
+            frame.focused && frame.hands[hand].aim_tracked);
+        POINT cursor{};
+        DWORD foreground=0;
+        GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
+        const bool mouse_focus=!test_ && foreground==GetCurrentProcessId();
+        if (mouse_focus && GetCursorPos(&cursor) && desktop_mirror_) {
+            const auto point=desktop_mirror_->pointer(cursor,width_,height_);
+            if (point) {
+                const auto& fov=fovs_[0];
+                const float u=(*point)[0],v=(*point)[1];
+                const Vec3 direction{std::tan(fov.left)+u*(std::tan(fov.right)-std::tan(fov.left)),
+                    std::tan(fov.up)+v*(std::tan(fov.down)-std::tan(fov.up)),-1};
+                auto ray=tracked_[0];
+                ray.orientation=multiply(ray.orientation,bone_between({0,0,-1},direction));
+                mouse_hit=settings_anchor_.intersect(ray);
+            }
+        }
+        settings_.point(mouse_hit?mouse_hit->u:-1,mouse_hit?mouse_hit->v:-1,
+            (GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0,false,mouse_focus);
+        if (!settings_texture_.get()) {
+            gpu_check(device_->CreateTexture(OutlastSettingsMenu::width,OutlastSettingsMenu::height,1,
+                D3DUSAGE_DYNAMIC,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,settings_texture_.put(),nullptr),
+                "Create live VR settings texture");
+            settings_revision_=0;
+        }
+        if (settings_revision_!=settings_.revision()) {
+            const auto pixels=settings_.pixels();
+            D3DLOCKED_RECT locked{};
+            gpu_check(settings_texture_->LockRect(0,&locked,nullptr,D3DLOCK_DISCARD),"Update live VR settings");
+            for (unsigned y=0;y<OutlastSettingsMenu::height;++y)
+                std::memcpy(static_cast<BYTE*>(locked.pBits)+y*locked.Pitch,
+                    pixels.data()+y*OutlastSettingsMenu::width,OutlastSettingsMenu::width*sizeof(DWORD));
+            gpu_check(settings_texture_->UnlockRect(0),"Finish live VR settings texture");
+            settings_revision_=settings_.revision();
+        }
+        if (!panel_renderer_) panel_renderer_=std::make_unique<D3D9WorldPanel>(*device_.get());
+        panel_renderer_->draw_overlay(*settings_texture_.get(),*final_surface_.get(),width_,height_,eyes);
+        if (controller_hit) {
+            const TrackingFrame identity{{0,0,0},{1,0,0},{0,1,0},{0,0,1},1,{0,0,0}};
+            StereoViewConstants views{};
+            for (unsigned eye=0;eye<2;++eye)
+                views[eye]=eye_constants(identity,tracked_[eye],fovs_[eye],.01f,1000);
+            panel_renderer_->draw_pointer(*final_surface_.get(),width_,height_,views,aim.position,
+                controller_hit->point,true);
+        }
+    }
     bool begin_frame() {
         DiagnosticScope diagnostic(render_phase_,2);
         on_render_thread();
@@ -661,7 +763,8 @@ class Runtime {
             head_frame_.reset();
             return false;
         }
-        motion_controls_.publish(xr().motion_frame(),input_clock());
+        poll_settings();
+        motion_controls_.publish(settings_.captures_input()?MotionFrame{}:xr().motion_frame(),input_clock());
         if (motion_enabled_) {
             const auto feedback=motion_controls_.rumble(input_clock());
             for (unsigned hand=0;hand<2;++hand) xr().vibrate(hand,feedback[hand],100000000);
@@ -715,6 +818,7 @@ class Runtime {
             const bool initial=!recenter_.initialized();
             recenter_.recenter(absolute,!initial && !acquire_floor);
             comfort_.reset();
+            body_follow_.reset();
             if (acquire_floor) {
                 floor_reference_ready_=true;
                 ++stats_.floor_reference_acquisitions;
@@ -745,7 +849,9 @@ class Runtime {
         motion_controls_.movement_yaw(!head_tracked &&
             config_.comfort.movement_reference==MovementReference::head?std::optional<float>{}:
             comfort_.movement_yaw(config_.comfort,motion,recenter_,head),gameplay);
-        vignette_strength_=OutlastComfort::vignette(config_.comfort,motion,gameplay);
+        auto live_comfort=config_.comfort;
+        live_comfort.vignette_strength=settings_.vignette_strength();
+        vignette_strength_=OutlastComfort::vignette(live_comfort,motion,gameplay);
         for (unsigned eye=0;eye<2;++eye) tracked_[eye]=relative_pose(absolute[eye]);
         if (xr().floor_known() && !floor_reference_ready_) {
             const float center_y=(tracked_[0].position.y+tracked_[1].position.y)*.5f;
@@ -774,7 +880,8 @@ class Runtime {
         const auto now=input_clock();
         const auto flags=xr().view_state_flags();
         const auto required=XR_VIEW_STATE_POSITION_TRACKED_BIT|XR_VIEW_STATE_ORIENTATION_TRACKED_BIT;
-        const bool current=(flags&required)==required && motion_controls_.sample(now).focused &&
+        const auto motion=motion_controls_.sample(now);
+        const bool current=(flags&required)==required && motion.focused &&
             !present_panel_ && !native_interactive_menu_.load(std::memory_order_acquire);
         std::lock_guard<std::mutex> lock(skeleton_mutex_);
         head_frame_.reset();
@@ -811,7 +918,9 @@ class Runtime {
             native.pawn_crouched,native.special!=0,input_clock());
         if (motion_controls_.take_stance_warning())
             log("Native physical crouch request was not accepted after two bounded attempts; retries suspended until height changes");
-        if (!eligible) {body_frame_.reset();return;}
+        if (!eligible) {body_follow_.reset();body_frame_.reset();return;}
+        targets.body_yaw_radians=body_follow_.update(settings_.enabled(OutlastSettingsMenu::body_follow),
+            settings_.deadzone(),targets.head.orientation,native.hero,input_clock());
         if (native.basic==0 && !native.pawn_crouched && !native.special && standing_camera_hero_!=native.hero) {
             standing_camera_hero_=native.hero;
             standing_camera_height_=tracking.origin.z-native.root.z;
@@ -876,7 +985,8 @@ class Runtime {
         return camcorder_claims_grip(physical_camera_.frame,physical_camera_.clock,
             motion,now,config_.comfort.primary_hand());
     }
-    std::optional<OutlastUseRay> controller_use_ray(void* hero,UINT64 now) {
+    std::optional<OutlastUseRay> controller_use_ray(void* hero,UINT64 now,bool grip=false,
+        float* units=nullptr) {
         if (GetCurrentThreadId()!=input_thread_.load(std::memory_order_acquire)) {
             if (!native_use_thread_warned_.exchange(true,std::memory_order_acq_rel))
                 log("Controller-directed use deferred outside the observed native gameplay thread");
@@ -889,17 +999,28 @@ class Runtime {
         }
         const auto current=motion_controls_.sample(now);
         if (!request || request->native.hero!=reinterpret_cast<std::uintptr_t>(hero) ||
-            !current.focused || !current.hands[config_.comfort.primary_hand()].aim_tracked ||
+            !current.focused || !(grip?current.hands[config_.comfort.primary_hand()].grip_tracked:
+                current.hands[config_.comfort.primary_hand()].aim_tracked) ||
             native_interactive_menu_.load(std::memory_order_acquire) ||
             camera_claims_use(current,now) ||
-            menu_state_() || field<BYTE>(hero,0x7bc)!=0 || field<BYTE>(hero,0x7bd)!=0)
+            menu_state_() || field<BYTE>(hero,0x7bc)>1 || field<BYTE>(hero,0x7bd)!=0)
             return {};
-        return outlast_controller_use_ray(native_body_tracking(hero,*request),request->motion,
+        const auto tracking=native_body_tracking(hero,*request);
+        auto motion=request->motion;
+        if (grip) {
+            auto& hand=motion.hands[config_.comfort.primary_hand()];
+            hand.aim=hand.grip;hand.aim_tracked=hand.grip_tracked;
+        }
+        if (units) *units=tracking.units_per_meter;
+        return outlast_controller_use_ray(tracking,motion,
             request->clock,now,true,config_.comfort.primary_hand());
     }
     UINT64 evaluate_native_use(NativeUseEntry original,const char* kind,void* hero,INT action) {
         const auto now=input_clock();
-        const auto ray=controller_use_ray(hero,now);
+        const bool pickup=original==original_pickup_ && action;
+        float units=0;
+        const auto ray=controller_use_ray(hero,now,pickup,&units);
+        const auto visibility_origin=field<Vec3>(hero,0x30e4);
         const auto before_origin=field<std::array<unsigned char,sizeof(Vec3)>>(hero,0x30e4);
         const auto before_direction=field<std::array<unsigned char,sizeof(Vec3)>>(hero,0x2bd8);
         std::optional<OutlastNativeUsePose> scope;
@@ -907,7 +1028,10 @@ class Runtime {
         const auto observed_origin=field<Vec3>(hero,0x30e4);
         const auto observed_direction=field<Vec3>(hero,0x2bd8);
         const auto body_origin=field<Vec3>(hero,0x80);
-        const auto result=original(hero,action);
+        const auto result=pickup && ray?
+            outlast_hand_pickup(hero,ray->origin,visibility_origin,settings_.radius()*units,
+                world_trace_,native_world_?*native_world_:nullptr):
+            original(hero,action);
         const auto selected=field<void*>(hero,0x3648);
         const auto special=field<BYTE>(hero,0x7bd);
         const auto completion_begin=input_clock();
@@ -968,6 +1092,18 @@ class Runtime {
     }
     static UINT64 WINAPI native_use_volume(void* hero,INT action) {
         return guarded([&] {auto& r=self();return r.evaluate_native_use(r.original_use_volume_,"use-volume",hero,action);});
+    }
+    static UINT64 WINAPI native_door_admit(void* hero) {
+        return guarded([&]() -> UINT64 {
+            auto& r=self();
+            const auto opened=outlast_open_door_without_player_animation(hero,
+                r.original_door_find_,r.door_open_,r.door_context_);
+            if (opened) {
+                if (*opened) ++r.stats_.doors_opened_without_animation;
+                return *opened;
+            }
+            return r.original_door_admit_(hero);
+        });
     }
     void sample_native_camcorder(PhysicalCamera& camera,const TrackingFrame& tracking) {
         const auto pose=camcorder_mesh_->pose(tracking);
@@ -2037,6 +2173,11 @@ class Runtime {
         return guarded([&] {
             auto& r=self();GraphicsScope graphics(r);
             const auto result=r.original<DirectInputDevice>(input,3)(input,guid,device,outer);
+            if (SUCCEEDED(result) && device && *device) {
+                r.com_hook(*device,9,&settings_input_state);
+                r.com_hook(*device,10,&probe_mouse_data);
+                r.hooks_->enable_pending();
+            }
             if (SUCCEEDED(result) && device && *device && outlast_desktop_mouse(guid)) {
                 auto* retained=static_cast<IUnknown*>(*device);
                 retained->AddRef();
@@ -2242,11 +2383,21 @@ class Runtime {
         return guarded([&] {
             auto& r=self();
             const auto owned=r.probe_mouse_.load(std::memory_order_acquire);
-            const auto result=r.original_mouse_data_(device,stride,data,count,flags);
-            if (device==owned && SUCCEEDED(result) && count) {
+            const auto result=r.hooks_->original_for<MouseDataEntry>(device,10)(device,stride,data,count,flags);
+            if ((device==owned || r.settings_.captures_input()) && SUCCEEDED(result) && count) {
                 r.suppressed_mouse_records_.fetch_add(*count,std::memory_order_relaxed);
                 *count=0;
             }
+            return result;
+        });
+    }
+    static HRESULT WINAPI settings_input_state(void* device,DWORD bytes,void* data) {
+        return guarded([&] {
+            auto& r=self();
+            using State=HRESULT(WINAPI*)(void*,DWORD,void*);
+            // Native input must not wait behind xrWaitFrame's graphics ownership.
+            const auto result=r.hooks_->original_for<State>(device,9)(device,bytes,data);
+            if (SUCCEEDED(result) && data && r.settings_.captures_input()) std::memset(data,0,bytes);
             return result;
         });
     }
@@ -2291,7 +2442,7 @@ class Runtime {
             if (index==0 && r.camcorder_capture_ &&
                 r.camera_claims_use(r.motion_controls_.sample(clock),clock)) use_ready=false;
             const auto status=r.motion_controls_.state(index,output,result,physical,clock,menu_pointer,use_ready,
-                r.test_ || r.config_.physical_camcorder);
+                r.test_ || r.config_.physical_camcorder,r.settings_.captures_input());
             if (index==0 && output && status==ERROR_SUCCESS) {
                 const WORD actions=output->Gamepad.wButtons&
                     (XINPUT_GAMEPAD_X|XINPUT_GAMEPAD_B|XINPUT_GAMEPAD_BACK|XINPUT_GAMEPAD_START);
@@ -2917,7 +3068,7 @@ class Runtime {
             const auto mouse=field<void*>(reinterpret_cast<const void*>(r.base_),0x201e218);
             if (mouse && !r.probe_mouse_) {
                 GraphicsScope graphics(r);
-                r.hooks_->add(entry<MouseDataEntry>(mouse,10),&probe_mouse_data,r.original_mouse_data_);
+                r.com_hook(mouse,10,&probe_mouse_data);
                 r.probe_mouse_.store(mouse,std::memory_order_release);
                 r.hooks_->enable_pending();
             } else if (mouse && mouse!=r.probe_mouse_) {
@@ -3501,10 +3652,10 @@ class Runtime {
         log("Desktop presentation interval "+std::to_string(p.PresentationInterval)+
             " -> immediate; frame pacing owned by OpenXR");
         p.PresentationInterval=D3DPRESENT_INTERVAL_IMMEDIATE;
-        if (headless_probe) {
-            p.Windowed=TRUE;
-            p.FullScreen_RefreshRateInHz=0;
-        }
+        // Exclusive fullscreen loses its desktop output when the VR compositor
+        // owns focus. Keep the native window presentable independently of focus.
+        p.Windowed=TRUE;
+        p.FullScreen_RefreshRateInHz=0;
     }
     static HRESULT WINAPI create_device(IDirect3D9* f,UINT,D3DDEVTYPE type,HWND window,DWORD flags,D3DPRESENT_PARAMETERS* p,IDirect3DDevice9** out) {
         return guarded([&] {auto& r=self();GraphicsScope graphics(r);
@@ -3937,6 +4088,7 @@ class Runtime {
                         r.comfort_filter_=std::make_unique<D3D9ComfortFilter>(*d);
                     r.comfort_filter_->draw(*r.final_surface_.get(),r.vignette_strength_);
                 }
+                if (!loading) r.compose_settings();
                 const bool direct=!r.present_panel_ && r.width_==r.xr().width() && r.height_==r.xr().height();
                 if (!direct && !r.submission_.get()) {
                     gpu_check(d->CreateTexture(r.xr().width()*2,r.xr().height(),1,D3DUSAGE_RENDERTARGET,
@@ -3985,8 +4137,26 @@ class Runtime {
                 r.frame_open_=false;++r.stats_.submitted;
             }
             const RECT left{0,0,LONG(r.width_),LONG(r.height_)};
-            gpu_check(d->StretchRect(r.final_surface_.get(),&left,r.desktop_.get(),nullptr,D3DTEXF_LINEAR),
-                "Mirror native left eye to the unchanged desktop");
+            Com<IDirect3DSurface9> desktop;
+            gpu_check(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,desktop.put()),
+                "Acquire current native desktop backbuffer");
+            gpu_check(d->StretchRect(r.final_surface_.get(),&left,desktop.get(),nullptr,D3DTEXF_LINEAR),
+                "Mirror native left eye to the current desktop");
+            if (r.desktop_mirror_observer_)
+                r.desktop_mirror_observer_(d,r.final_surface_.get(),desktop.get());
+            if (!r.test_ && (!headless_probe || r.probe_desktop_mirror_)) {
+                if (!r.desktop_mirror_) {
+                    r.desktop_mirror_=std::make_unique<OutlastDesktopMirror>();
+                    log("Visible desktop mirror: Outlast VR - Desktop; independent DXGI window/swapchain; final left eye only");
+                }
+                const bool shown=r.desktop_mirror_->present(*d,*r.final_surface_.get(),r.width_,r.height_);
+                if (r.window_cursor_) r.window_cursor_->park_native_desktop();
+                if (r.stats_.frames<3 || r.stats_.frames%300==0)
+                    log("Desktop mirror frame="+std::to_string(r.stats_.frames)+
+                        "; presented="+(shown?"true":"false")+
+                        "; visible="+std::to_string(IsWindowVisible(r.desktop_mirror_->window()))+
+                        "; minimized="+std::to_string(IsIconic(r.desktop_mirror_->window())));
+            }
             ++r.stats_.frames;
             r.camcorder_world_depth_.reset();
             r.frame_attempted_=false;
@@ -4009,6 +4179,7 @@ class Runtime {
             r.gpu_profile_.reset();
             r.performance_=PerformanceBatch{};
             r.panel_renderer_.reset();
+            r.settings_texture_.reset();
             r.camcorder_renderer_.reset();
             r.comfort_filter_.reset();
             r.camcorder_world_depth_.reset();
@@ -4021,6 +4192,7 @@ class Runtime {
                 gpu_check(d->SetDepthStencilSurface(nullptr),"Detach stereo depth before native reset");
             }
             r.final_surface_.reset();r.submission_surface_.reset();r.desktop_.reset();
+            if (r.desktop_mirror_) r.desktop_mirror_->reset();
             r.final_.reset();r.submission_.reset();r.native_textures_.clear();
             const auto result=r.original<Reset>(d,16)(d,p);
             if (SUCCEEDED(result)) {
@@ -4033,6 +4205,14 @@ class Runtime {
     void bind_native(const RuntimeBindings& bindings) {
         native_movie_player_=bindings.movie_player;
         frame_rate_engine_=bindings.frame_rate_engine;
+        world_trace_=bindings.world_trace;native_world_=bindings.native_world;
+        if (bindings.door_find || bindings.door_admit || bindings.door_open || bindings.door_context) {
+            if (!bindings.door_find || !bindings.door_admit || !bindings.door_open || !bindings.door_context)
+                throw std::invalid_argument("Native doors require complete opening bindings");
+            original_door_find_=bindings.door_find;
+            door_open_=bindings.door_open;door_context_=bindings.door_context;
+            hooks_->add(bindings.door_admit,&native_door_admit,original_door_admit_);
+        }
         if (bindings.night_light_tick || bindings.actor_matrix || bindings.light_rotation) {
             if (!bindings.night_light_tick || !bindings.actor_matrix || !bindings.light_rotation)
                 throw std::invalid_argument("Native headset light requires complete pose bindings");
@@ -4170,16 +4350,19 @@ public:
         present_panel_=!test_;
         if (test_) {
             if (module_path(nullptr).filename()!=L"test_integrated_mod.exe" ||
-                test->size!=sizeof(*test) || test->version!=14 || !test->xr_resolve)
+                test->size!=sizeof(*test) || test->version!=17 || !test->xr_resolve)
                 throw std::invalid_argument("Controlled surrogate initialization is not admitted");
             world_up_=test->world_up;
             config_.comfort=test->comfort;
+            desktop_mirror_observer_=test->desktop_mirror_observer;
+            settings_.configure(config_);
             motion_controls_.configure(config_.comfort);
             test_xr_=std::make_unique<OpenXRStereoSession>(test->xr_resolve);
         } else {
             OutlastNativeImage image(module_path(nullptr));
             const auto mod_directory=module_path(own_module).parent_path();
             config_=load_outlast_config(mod_directory);
+            settings_.configure(config_);
             log("Configured experimental flights: instant_pickups="+std::string(config_.instant_pickups?"true":"false")+
                 "; physical_camcorder="+(config_.physical_camcorder?"true":"false"));
             motion_controls_.configure(config_.comfort);
@@ -4189,6 +4372,11 @@ public:
             if (length && (length!=1 || mode[0]!=L'1'))
                 throw std::invalid_argument("Invalid headset-free verification mode");
             headless_probe=length!=0;
+            wchar_t mirror_probe[2]{};
+            const auto mirror_length=GetEnvironmentVariableW(L"OLVR_PROBE_DESKTOP_MIRROR",mirror_probe,2);
+            if (mirror_length && (!headless_probe || mirror_length!=1 || mirror_probe[0]!=L'1'))
+                throw std::invalid_argument("Visible mirror diagnostic requires explicit headset-free mode");
+            probe_desktop_mirror_=mirror_length!=0;
             wchar_t motion[8]{};
             const auto motion_length=GetEnvironmentVariableW(L"OLVR_PROBE_MOTION",motion,UINT(std::size(motion)));
             if (motion_length && (!headless_probe || motion_length!=1 || motion[0]!=L'1'))
@@ -4574,12 +4762,18 @@ public:
                     hooks_->add(retail_entry<NativeLocalize>(image,0xb0340),
                         &localize_vr_tutorial,original_localize_);
                     world_trace_=retail_entry<NativeWorldTrace>(image,0x506920);
+                    b.world_trace=world_trace_;
+                    b.door_find=retail_entry<OutlastDoorFind>(image,0xd005b0);
+                    b.door_admit=retail_entry<OutlastDoorAdmit>(image,0xd4bc40);
+                    b.door_open=retail_entry<OutlastDoorOpen>(image,0xd4a770);
+                    b.door_context=retail_entry<OutlastDoorContext>(image,0xcb6360);
                     complete_pickup_=retail_entry<OutlastPickupComplete>(image,0xd8ce40);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xce8f10),&native_pickup,original_pickup_);
                     hooks_->add(retail_entry<NativeUseEntry>(image,0xd7b300),&native_use_volume,original_use_volume_);
                     if (module_extent_<0x200b5b0)
                         throw std::runtime_error("Recovered collision world lies outside the exact retail image");
                     native_world_=reinterpret_cast<void**>(base_+0x200b5a8);
+                    b.native_world=native_world_;
                     b.input_tick=retail_entry<InputTickEntry>(image,0xc4cf90);
                     b.gamepad_state=retail_entry<GamepadStateEntry>(image,0xe6b4ac);
                     b.gamepad_vibration=retail_entry<GamepadVibrationEntry>(image,0xe6b4a6);
@@ -4690,6 +4884,7 @@ public:
             for (unsigned i=0;i<3;++i) std::memcpy(reinterpret_cast<void*>(base_+offsets[i]),&saved_policy_[i],4);
         }
         capture_gamma_shader_.reset();
+        desktop_mirror_.reset();
         variants_.reset();final_surface_.reset();submission_surface_.reset();desktop_.reset();
         final_.reset();submission_.reset();device_.reset();instance_=nullptr;
     }
@@ -4785,6 +4980,14 @@ DWORD initialize(const RuntimeTestConfiguration* test) {
 }
 
 extern "C" __declspec(dllexport) DWORD WINAPI OutlastVR_Initialize(void*) {return initialize(nullptr);}
+extern "C" __declspec(dllexport) IDirect3D9* WINAPI OutlastVR_Create9(UINT version) {
+    if (version!=D3D_SDK_VERSION) return nullptr;
+    if (!runtime && initialize(nullptr)!=0) {
+        MessageBoxA(nullptr,last_error.c_str(),"Outlast VR could not start",MB_OK|MB_ICONERROR);
+        return nullptr;
+    }
+    return runtime->graphics();
+}
 extern "C" __declspec(dllexport) DWORD WINAPI OutlastVR_TestInitialize(const RuntimeTestConfiguration* config) {return initialize(config);}
 extern "C" __declspec(dllexport) IDirect3D9* WINAPI OutlastVR_TestGraphics() {
     if (!runtime) return nullptr;

@@ -15,11 +15,18 @@ for the accepted game build and controller profiles.
 1. Download the Windows ZIP from [Releases](https://github.com/czearing/OutlastVR/releases).
    Read that version's release notes for changes and known issues.
 2. Extract **all** files beside `Outlast\Binaries\Win64\OLGame.exe`.
-3. Start your headset runtime, then run `OutlastVRLauncher.exe`.
+3. Start your headset runtime, then launch Outlast normally through Steam or
+   `OLGame.exe`. The included `d3d9.dll` loads VR automatically.
+
+The **Outlast VR - Desktop** window shows the final left eye for desktop viewing
+and recording. In OBS, use Window Capture for that window or capture the display.
+It copies the existing VR image; it does not render the world a second time.
+Back up any existing third-party `d3d9.dll` before installing; do not overwrite
+another injector without keeping a rollback.
 
 Alternatively, extract anywhere and set `[game] executable` in `OutlastVR.ini`
-to your `OLGame.exe` path. `OutlastVRLauncher.exe --verify` checks compatibility
-without launching the game.
+to your `OLGame.exe` path. Run `OutlastVRLauncher.exe` to start VR from that
+folder; `OutlastVRLauncher.exe --verify` checks compatibility without launching.
 
 ## Player guide
 
@@ -34,8 +41,10 @@ without launching the game.
 Close the game before updating. Back up `OutlastVR.ini`, extract the new release,
 then restore your settings. Check the release notes for any new options.
 
-The mod does not replace the game executable. Launch through Steam to play
-without VR. To uninstall, remove only the files supplied by the mod ZIP.
+The mod does not replace the game executable. To launch normally without VR,
+rename the mod's `d3d9.dll` to `d3d9.dll.disabled` and do not use the VR launcher.
+To uninstall, remove only the files supplied by the mod ZIP and restore any
+previously backed-up injector.
 
 ## Development
 

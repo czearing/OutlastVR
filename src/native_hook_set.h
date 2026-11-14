@@ -4,10 +4,12 @@
 #include "MinHook.h"
 #include <iostream>
 #include <vector>
+#include <mutex>
 
 namespace olvr {
 
 class NativeHookSet {
+    mutable std::mutex mutex_;
     struct Hook {void* target;void* replacement;void* trampoline;bool enabled;};
     std::vector<Hook> hooks_;
     bool initialized_=false;
@@ -23,6 +25,7 @@ public:
     NativeHookSet& operator=(const NativeHookSet&)=delete;
     template<class Function>
     void add(Function target,Function replacement,Function& original) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!target || !replacement) throw std::invalid_argument("Native hook entry cannot be null");
         const auto address=reinterpret_cast<void*>(target);
         for (const auto& hook:hooks_) {
@@ -37,18 +40,21 @@ public:
         hooks_.push_back({address,reinterpret_cast<void*>(replacement),reinterpret_cast<void*>(original),false});
     }
     template<class Function> Function original_for(void* object,std::size_t index) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         void** table=nullptr;std::memcpy(&table,object,sizeof(table));
         for (const auto& hook:hooks_)
             if (hook.target==table[index]) return reinterpret_cast<Function>(hook.trampoline);
         throw std::logic_error("COM original entry was not registered by the runtime");
     }
     void enable_pending() {
+        std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& hook:hooks_)
             if (!hook.enabled) check(MH_QueueEnableHook(hook.target),"Queue owned native hook");
         check(MH_ApplyQueued(),"Activate owned native hooks");
         for (auto& hook:hooks_) hook.enabled=true;
     }
     ~NativeHookSet() {
+        std::lock_guard<std::mutex> lock(mutex_);
         bool failed=false;
         for (auto it=hooks_.rbegin();it!=hooks_.rend();++it) {
             const auto status=MH_RemoveHook(it->target);

@@ -8,6 +8,12 @@ int main() {
         auto require=[](bool value) {if (!value) throw std::runtime_error("Configuration regression");};
         require(!parse("").physical_camcorder);
         require(!parse("").comfort.hit_distortion);
+        require(parse("").comfort.body_follow && parse("").comfort.body_follow_deadzone==35);
+        const auto live=parse("[vr]\nbody_follow=false\nbody_follow_deadzone=45\nhand_pickup_radius=.35\n"
+            "bloom=false\nfilm_grain=false\n");
+        require(!live.comfort.body_follow && live.comfort.body_follow_deadzone==45 &&
+            live.comfort.hand_pickup_radius==.35f && !live.comfort.bloom &&
+            !live.comfort.film_grain);
         require(parse("[vr]\nhit_distortion=true\n").comfort.hit_distortion);
         require(!parse("[vr]\nhit_distortion=false\n").comfort.hit_distortion);
         require(parse("").instant_pickups && !parse("[experimental]\ninstant_pickups=false\n").instant_pickups);
@@ -33,6 +39,10 @@ int main() {
                 "[vr]\nvignette_strength=2","[vr]\nseated=yes","[vr]\nmovement_reference=wrong",
                 "[vr]\ntoggle_sprint=yes","[experimental]\ninstant_pickups=yes",
                 "[vr]\nhit_distortion=yes","[vr]\nhit_distortion=",
+                "[vr]\nbody_follow_deadzone=0","[vr]\nbody_follow_deadzone=91",
+                "[vr]\nhand_pickup_radius=0","[vr]\nhand_pickup_radius=.7",
+                "[vr]\nbloom=yes","[vr]\nfilm_grain=1",
+                "[experimental]\nhand_doors=yes",
                 "[vr]\nhit_distortion=true\nhit_distortion=false",
                 "[experimental]\ninstant_pickups=true\ninstant_pickups=false"}) {
             bool rejected=false;

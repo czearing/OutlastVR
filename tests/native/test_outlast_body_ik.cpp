@@ -61,7 +61,8 @@ int main(int argc,char** argv) {
         const std::string fault=argc==3?argv[2]:"";
         require(fault.empty() || fault=="--fault-frozen" || fault=="--fault-stretch" ||
             fault=="--fault-camera" || fault=="--fault-skinning" ||
-            fault=="--fault-grip-offset" || fault=="--fault-grip-axes","Unknown body proof control");
+            fault=="--fault-grip-offset" || fault=="--fault-grip-axes" ||
+            fault=="--body-follow","Unknown body proof control");
         std::ifstream file(argv[1],std::ios::binary);
         auto read=[&](void* data,std::size_t size) {
             if (!file.read(static_cast<char*>(data),std::streamsize(size)))
@@ -120,6 +121,34 @@ int main(int argc,char** argv) {
             require(threw && !rejected.calibrated(),"Invalid named native skinning binding was accepted");
         }
         ik.calibrate(native,bones,targets,skin_bones);
+        {
+            auto neutral=native;
+            ik.apply(neutral,targets);
+            for (const float yaw:{-2.35619449f,-1.04719755f,1.04719755f,2.35619449f}) {
+                auto turning=native;
+                auto request=targets;request.body_yaw_radians=yaw;
+                const auto result=ik.apply(turning,request);
+                require(distance(world(turning,bones[5]),world(neutral,bones[5]))<.02,
+                    "Following torso moved the tracked head position");
+                for (unsigned side=0;side<2;++side) {
+                    require(result.hand_target_error[side]<.1f,
+                        "Following torso detached a controller");
+                }
+                const auto up=bone_unit(bone_world_to_component_vector(native,targets.tracking.up));
+                const auto reference=add(neutral.atoms[bones[1]].position,
+                    scale(neutral.atoms[bones[5]].position,-1));
+                const auto axis=scale(up,std::sin(-yaw*.5f));
+                const auto expected=oracle_rotate({axis.x,axis.y,axis.z,std::cos(yaw*.5f)},reference);
+                const auto actual=add(turning.atoms[bones[1]].position,
+                    scale(turning.atoms[bones[5]].position,-1));
+                require(distance(actual,expected)<.02,"Body yaw did not follow mapped headset handedness");
+            }
+        }
+        if (fault=="--body-follow") {
+            std::cout<<"PASS: actual_native_73_bone_body_follow; bounded_deadzone_separate_from_view; "
+                "mapped_handedness; preserved_head_position; maintained_controller_targets; yaw_both_directions\n";
+            return 0;
+        }
         const float standing_head=original[bones[5]].position.z;
         for (unsigned frame=0;frame<120;++frame) {
             current=original;
@@ -378,7 +407,7 @@ int main(int argc,char** argv) {
                     const auto index=skeleton_field<Vec3>(reference.data(),std::size_t(side?40:16)*0x50+0x20);
                     const auto little=skeleton_field<Vec3>(reference.data(),std::size_t(side?49:25)*0x50+0x20);
                     const auto z=bone_unit(add(little,scale(index,-1)));
-                    const auto x=bone_unit(cross(z,center));
+                    const auto x=bone_unit(cross(center,z));
                     for (const auto pair:{std::pair<Vec3,Vec3>{x,{1,0,0}},{z,{0,0,1}}}) {
                         const auto actual=bone_unit(skeleton_vector(a.world,
                             oracle_rotate(original_wrist.rotation,pair.first)));

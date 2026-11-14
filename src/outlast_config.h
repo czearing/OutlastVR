@@ -16,6 +16,8 @@ struct OutlastComfortSettings {
     bool seated=false,left_handed=false,toggle_sprint=false;
     MovementReference movement_reference=MovementReference::game;
     bool hit_distortion=false;
+    bool body_follow=true,bloom=true,film_grain=true;
+    float body_follow_deadzone=35,hand_pickup_radius=.30f;
     unsigned primary_hand() const {return left_handed?0u:1u;}
 };
 struct OutlastConfig {
@@ -57,6 +59,8 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
         if (!seen.insert(key).second) throw error("duplicate setting "+key);
         if (key=="experimental.physical_camcorder" || key=="experimental.instant_pickups" ||
             key=="vr.seated" || key=="vr.left_handed" ||
+            key=="vr.body_follow" ||
+            key=="vr.bloom" || key=="vr.film_grain" ||
             key=="vr.toggle_sprint" || key=="vr.hit_distortion") {
             if (value!="true" && value!="false") throw error("expected true or false");
             if (key=="experimental.physical_camcorder") result.physical_camcorder=value=="true";
@@ -64,8 +68,12 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
             else if (key=="vr.seated") result.comfort.seated=value=="true";
             else if (key=="vr.left_handed") result.comfort.left_handed=value=="true";
             else if (key=="vr.hit_distortion") result.comfort.hit_distortion=value=="true";
+            else if (key=="vr.body_follow") result.comfort.body_follow=value=="true";
+            else if (key=="vr.bloom") result.comfort.bloom=value=="true";
+            else if (key=="vr.film_grain") result.comfort.film_grain=value=="true";
             else result.comfort.toggle_sprint=value=="true";
-        } else if (key=="vr.snap_turn_degrees" || key=="vr.world_scale" || key=="vr.vignette_strength") {
+        } else if (key=="vr.snap_turn_degrees" || key=="vr.world_scale" || key=="vr.vignette_strength" ||
+                   key=="vr.body_follow_deadzone" || key=="vr.hand_pickup_radius") {
             std::istringstream number(value);number.imbue(std::locale::classic());
             float parsed=0;
             if (!(number>>parsed) || !(number>>std::ws).eof() || !std::isfinite(parsed))
@@ -76,6 +84,12 @@ inline OutlastConfig parse_outlast_config(std::istream& input) {
             } else if (key=="vr.world_scale") {
                 if (parsed<.5f || parsed>2) throw error("world_scale must be 0.5..2");
                 result.comfort.world_scale=parsed;
+            } else if (key=="vr.body_follow_deadzone") {
+                if (parsed<10 || parsed>90) throw error("body_follow_deadzone must be 10..90");
+                result.comfort.body_follow_deadzone=parsed;
+            } else if (key=="vr.hand_pickup_radius") {
+                if (parsed<.1f || parsed>.6f) throw error("hand_pickup_radius must be 0.1..0.6 metres");
+                result.comfort.hand_pickup_radius=parsed;
             } else {
                 if (parsed<0 || parsed>1) throw error("vignette_strength must be 0..1");
                 result.comfort.vignette_strength=parsed;

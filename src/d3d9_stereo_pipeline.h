@@ -4,6 +4,7 @@
 #include "d3d9_indexed_device.h"
 #include "sm3_tracked_uniforms.h"
 #include "d3d9_point_atlas.h"
+#include "outlast_effect_constants.h"
 #include <array>
 #include <memory>
 
@@ -35,6 +36,7 @@ struct StereoShaderBinding {
     std::vector<sm3::TrackedPair::ConstantRow> pixel_constant_rows{};
     bool tracked_world_scissor=false;
     std::vector<std::pair<unsigned,unsigned>> atlas_point_samplers{};
+    OutlastEffectConstants effect_constants{};
 };
 
 // Requires a compatible transformed shader pair and an already bound stereo atlas.

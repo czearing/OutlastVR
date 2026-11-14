@@ -12,9 +12,10 @@ foreach(name IN ITEMS
     test_outlast_config test_outlast_night_vision test_outlast_camcorder
     test_native_camcorder_lifecycle test_native_camera_resources
     test_outlast_desktop_cursor test_outlast_focus_pause test_outlast_render_size
-    test_outlast_motion_controls test_outlast_native_use test_outlast_hand_collision test_outlast_vr_hints
+    test_outlast_motion_controls test_outlast_native_use test_outlast_hand_pickup test_outlast_door
+    test_outlast_hand_collision test_outlast_vr_hints
     test_outlast_body_lifecycle
-    test_outlast_comfort
+    test_outlast_comfort test_outlast_settings_menu
     test_native_probe_progress test_native_probe_input test_outlast_locomotion_camera
     test_native_glass_eye_ownership test_native_ppm test_native_detours test_openxr_motion_input
     test_headlocked_ui test_world_scissor test_outlast_native_view)
@@ -40,6 +41,8 @@ add_test(NAME launcher_unknown_option COMMAND OutlastVRLauncher --unknown)
 set_tests_properties(launcher_unknown_option PROPERTIES WILL_FAIL TRUE)
 
 if(OLVR_HERO_FIXTURE)
+    add_test(NAME test_native_body_follow COMMAND test_outlast_body_ik "${OLVR_HERO_FIXTURE}" --body-follow)
+    set_tests_properties(test_native_body_follow PROPERTIES LABELS "cpu" TIMEOUT 120)
     foreach(name IN ITEMS test_controller_interaction test_outlast_native_camcorder
             test_outlast_body_ik test_outlast_hand_alignment)
         olvr_test(${name} "${OLVR_HERO_FIXTURE}")
@@ -55,7 +58,8 @@ endif()
 if(OLVR_GPU_TESTS)
     foreach(name IN ITEMS test_fractional_eye_atlas test_tracked_uniforms test_mono_atlas_resolve
             test_atlas_pixel_routing test_camcorder_screen test_point_eye_atlas
-            test_world_panel test_world_scissor_gpu test_stereo_transfer test_night_vision_filter)
+            test_world_panel test_world_scissor_gpu test_stereo_transfer test_night_vision_filter
+            test_outlast_effect_constants test_desktop_mirror)
         olvr_test(${name})
         target_compile_definitions(${name} PRIVATE OLVR_ISOLATED_9ON12)
         set_tests_properties(${name} PROPERTIES LABELS "gpu" RUN_SERIAL TRUE)
@@ -66,6 +70,8 @@ if(OLVR_GPU_TESTS)
     set_tests_properties(test_outlast_hit_distortion_packed PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME test_world_panel_canted COMMAND test_world_panel --canted)
     set_tests_properties(test_world_panel_canted PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
+    add_test(NAME test_world_panel_overlay COMMAND test_world_panel --overlay)
+    set_tests_properties(test_world_panel_overlay PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME test_runtime_gpu_adapter COMMAND test_stereo_transfer --adapter-selection)
     set_tests_properties(test_runtime_gpu_adapter PROPERTIES LABELS "gpu" RUN_SERIAL TRUE TIMEOUT 120)
     add_test(NAME test_material_camera_precision COMMAND test_tracked_uniforms --material-large-origin)
@@ -137,7 +143,7 @@ if(OLVR_GPU_TESTS)
         endforeach()
         foreach(mode IN ITEMS thread-handoff thread-overlap ui ui-in-renderer
                 ui-scaleform ui-scaleform-handoff camera-tilt camera-bob camera-handoff floor-startup
-                loading-blackout loading-upload-blackout material-constants)
+                loading-blackout loading-upload-blackout material-constants door-no-animation)
             string(REPLACE "-" "_" test_mode "${mode}")
             add_test(NAME test_integrated_${test_mode} COMMAND test_integrated_mod
                 "$<TARGET_FILE:OutlastVRSinglePass>" "${OLVR_RETAIL_EXECUTABLE}" --${mode})

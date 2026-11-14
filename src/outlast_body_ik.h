@@ -351,6 +351,7 @@ struct BodyIKTargets {
     EyePose head{{0,0,0},{0,0,0,1}};
     TrackingFrame tracking{};
     float standing_height_delta=0;
+    float body_yaw_radians=0;
     bool compensate_native_crouch=false;
     bool native_crouched=false,stance_transition=false;
     bool grip_anchored=false;
@@ -501,6 +502,19 @@ public:
             for (std::size_t i=4;i<skinning_.size();++i)
                 for (const INT helper:{skinning_[i].first,skinning_[i].second})
                     skeleton.atoms[helper]=original_[helper];
+        if (!std::isfinite(targets.body_yaw_radians))
+            throw std::invalid_argument("Nonfinite tracked body yaw");
+        if (targets.body_yaw_radians!=0) {
+            const auto up=bone_unit(bone_world_to_component_vector(skeleton,targets.tracking.up));
+            const float sign=dot(cross(targets.tracking.right,targets.tracking.up),
+                targets.tracking.backward)<0?-1.f:1.f;
+            const float half=targets.body_yaw_radians*sign*.5f;
+            const auto axis=scale(up,std::sin(half));
+            const auto head=skeleton.atoms[bones_[5]].position;
+            bone_rotate(skeleton,bones_[1],{axis.x,axis.y,axis.z,std::cos(half)},hierarchy);
+            bone_translate(skeleton,bones_[1],
+                add(head,scale(skeleton.atoms[bones_[5]].position,-1)),hierarchy);
+        }
         for (unsigned hand=0;hand<2;++hand) {
             result.feet[hand]=skeleton.atoms[feet[hand]].position;
             if (targets.compensate_native_crouch && targets.native_crouched &&

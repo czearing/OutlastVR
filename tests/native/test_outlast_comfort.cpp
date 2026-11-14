@@ -19,6 +19,32 @@ int main(int argc,char** argv) {
         const std::string fault=argc==2?argv[1]:"";
         require(argc<=2 && (fault.empty() || fault=="--fault-snap" || fault=="--fault-seated"),
             "Unknown comfort control");
+        {
+            OutlastBodyFollow body;
+            auto yaw=[](float degrees) {
+                const float half=degrees*.00872664626f;
+                return Quaternion{0,std::sin(half),0,std::cos(half)};
+            };
+            body.update(true,35,yaw(0),1,1000);
+            require(body.update(true,35,yaw(20),1,11000)==0,"Small glance rotated the body");
+            auto previous=body.update(true,35,yaw(90),1,21000);
+            require(previous>0 && previous<.1f,"Body follow snapped instead of catching up");
+            for (UINT64 now=31000;now<600000;now+=10000) {
+                const auto next=body.update(true,35,yaw(90),1,now);
+                require(next>=previous && next-previous<.063f,"Body follow exceeded its angular rate");
+                previous=next;
+            }
+            require(std::abs(previous-1.57079633f)<.0001f,"Body did not catch up with the headset");
+            require(body.update(true,35,yaw(110),1,600000)==previous,
+                "A new small glance moved the settled body");
+            require(body.update(true,35,yaw(180),2,610000)==0,"Body yaw leaked across hero replacement");
+            require(body.update(true,35,yaw(180),2,1000000)==0,"Tracking interruption replayed stale body yaw");
+            require(body.update(false,35,yaw(180),2,1010000)==0,"Disabled body follow retained a turn");
+            body.update(true,35,yaw(-170),3,2000000);
+            for (UINT64 now=2010000;now<3000000;now+=10000) body.update(true,35,yaw(-170),3,now);
+            const auto before=body.update(true,35,yaw(170),3,3000000);
+            require(std::abs(before+2.96705973f)<.0001f,"Angle wrap converted a small glance to a full turn");
+        }
         OutlastComfortSettings options;options.snap_turn_degrees=fault=="--fault-snap"?0.f:30.f;
         OutlastComfort comfort;
         MotionFrame motion{};motion.focused=true;motion.move_active=motion.turn_active=true;

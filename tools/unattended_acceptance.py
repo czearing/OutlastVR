@@ -16,7 +16,9 @@ import xml.etree.ElementTree as ET
 RETAIL_SHA256 = "06c1c37c7f1d0bd0296328ff977ff847bee82f878fb4d79f4282a026aef68a96"
 REQUIRED_TESTS = {
     "test_outlast_config", "test_outlast_camcorder", "test_outlast_native_use",
-    "test_outlast_motion_controls", "test_native_camcorder_lifecycle",
+    "test_outlast_motion_controls", "test_outlast_hand_pickup", "test_outlast_door",
+    "test_outlast_settings_menu", "test_desktop_mirror",
+    "test_world_panel_overlay", "test_outlast_effect_constants", "test_native_camcorder_lifecycle",
     "test_outlast_hand_collision", "test_outlast_desktop_cursor", "test_outlast_vr_hints",
     "test_outlast_body_lifecycle", "test_outlast_locomotion_camera",
     "test_outlast_native_view", "test_outlast_focus_pause",
@@ -27,10 +29,12 @@ REQUIRED_TESTS = {
     "test_material_world_position_native", "test_material_full_samplers",
     "test_integrated_mod", "test_integrated_reset_retry", "test_integrated_flat_wrap",
     "test_integrated_thread_overlap", "test_integrated_ui_scaleform_handoff",
-    "test_integrated_camera_bob", "test_integrated_camera_handoff", "test_integrated_floor_startup",
+    "test_integrated_camera_bob", "test_integrated_camera_handoff",
+    "test_integrated_floor_startup",
     "test_integrated_loading_blackout", "test_integrated_loading_upload_blackout",
     "test_pixel_uniform_constants", "test_pixel_uniform_register_pressure", "test_hit_effect_stereo",
     "test_integrated_material_constants",
+    "test_integrated_door_no_animation",
     "test_native_uniform_read_batching",
     "test_world_scissor", "test_world_scissor_gpu",
     "test_transparent_overdraw_stereo", "test_transparent_hit_overdraw",
@@ -44,7 +48,7 @@ DLL_MODES = (
     "--input-chords", "--input-recovery", "--reset-retry",
     "--flat-transitions", "--flat-upload", "--flat-wrap",
     "--loading-blackout", "--loading-upload-blackout",
-    "--material-constants",
+    "--material-constants", "--door-no-animation",
 )
 DLL_REJECTIONS = {
     "--fault-dual": "Compositor physical draw count failed: indexed=2; plain=0; instances=4",
@@ -241,6 +245,8 @@ def main(argv=None):
                     "PASS: native_skeleton_delta_forwarded; hero_and_NPC; volatile_XMM1_clobbered;",
                     "PASS: native_scripted_effects_preserved; modes=3,4,255; production_camera_update_continued",
                     "PASS: native_smoothing_disabled; unrelated_flags_preserved; absent_and_recreated_engine_checked",
+                    "PASS: actual_desktop_backbuffer; windowed_compositor_ownership; "
+                    "left_eye_RGB_pixel_agreement; checked_frames=20",
                 ]
                 if not mode:
                     markers += [
@@ -260,6 +266,11 @@ def main(argv=None):
                 if mode == "--material-constants":
                     markers += [
                         "native_material_pixel_camera_matches_independent_eye_camera; reset_recovered",
+                    ]
+                if mode == "--door-no-animation":
+                    markers += [
+                        "PASS: production_door_no_animation; native_selection_and_actor_open; "
+                        "unchanged_hero_and_camera; no_door_teleport; locked_door_preserved",
                     ]
                 if mode in ("--loading-blackout", "--loading-upload-blackout"):
                     markers += [
@@ -294,6 +305,8 @@ def main(argv=None):
             ["FAIL: Native reconstruction uniform contains nonfinite values"], expected_code=1)
         run("reject-headset-light", [paths["integrated"], module, retail, "--fault-headset-light"],
             ["FAIL: Production headset light correction was never exercised"], expected_code=1)
+        run("reject-door-no-animation", [paths["integrated"], module, retail, "--fault-door-no-animation"],
+            ["FAIL: Production door opening entered player animation instead of the native actor"], expected_code=1)
         run("reject-frame-pacing", [paths["integrated"], module, retail, "--fault-frame-pacing"],
             ["FATAL: VR pacing retained smoothing or overwrote unrelated engine flags"],
             expected_code=0xC0000602)
@@ -311,7 +324,7 @@ def main(argv=None):
         print(f"PASS: {report['ctest_passed']} CTest cases; "
               f"{args.cycles * len(DLL_MODES)} production DLL runs; "
               f"{args.session_cycles} in-process XR lifecycles; "
-              f"{len(DLL_REJECTIONS)+11} exact-diagnostic negative controls")
+              f"{len(DLL_REJECTIONS)+12} exact-diagnostic negative controls")
         print(f"Hardware/campaign gates remain open. Evidence: {report_path}")
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError, KeyError) as error:

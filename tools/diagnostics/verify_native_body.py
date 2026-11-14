@@ -16,6 +16,17 @@ def load_rows(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def reference_palm_axes(knuckles, version):
+    center = knuckles.mean(axis=0) * .5
+    z = knuckles[-1] - knuckles[0]
+    z /= np.linalg.norm(z)
+    x = np.cross(z, center)
+    if version == 2:
+        x = -x
+    x /= np.linalg.norm(x)
+    return center, x, z
+
+
 def segment_reference(before, standing, target, driver):
     reference_arm = (target.get("reference_upper_body", False) and driver in (10, 11, 34, 35)
                      and target["hands"][int(driver >= 34)]["tracked"])
@@ -195,14 +206,7 @@ def grade(directory, fault):
     palm_version = palm_versions.pop()
     for fingers in [(16, 19, 22, 25), (40, 43, 46, 49)]:
         knuckles = reference_records[list(fingers), 8:11]
-        center = knuckles.mean(axis=0) * .5
-        z = knuckles[-1] - knuckles[0]
-        z /= np.linalg.norm(z)
-        x = np.cross(center, z)
-        if palm_version == 2:
-            x = -x
-        x /= np.linalg.norm(x)
-        palm_geometry.append((center, x, z))
+        palm_geometry.append(reference_palm_axes(knuckles, palm_version))
     grip_evaluations = 0
     camera_local = None
     require(all(row["targets"].get("camera_hand", -1) in (-1, 0, 1) and

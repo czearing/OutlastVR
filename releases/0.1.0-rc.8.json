@@ -1,0 +1,17 @@
+{
+  "version": "0.1.0-rc.8",
+  "changes": [
+    "Fixed VR autoload when starting Outlast through Steam or OLGame.exe.",
+    "Added a recordable desktop view copied from the existing VR render.",
+    "Removed the extra empty game window from the desktop and Alt-Tab.",
+    "Removed player reach animations and scripted camera movement when opening ordinary hinged doors.",
+    "Added an F10 settings menu for effects, body-follow and pickup reach.",
+    "Added visual body-follow with a configurable small-glance deadzone.",
+    "Added tracked-hand proximity pickups."
+  ],
+  "known_issues": [
+    "Locked and scripted doors keep their original interactions; the new ordinary-door behavior still needs headset playtesting.",
+    "Physical camcorder controls remain experimental and are off by default.",
+    "Some scripted grabs and effects can still feel off; extended campaign and headset/runtime checks remain incomplete."
+  ]
+}

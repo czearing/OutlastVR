@@ -12,6 +12,29 @@ void require(bool value,const char* message) {
 }
 int main() {
     try {
+        {
+            OutlastMotionControls menu;
+            MotionFrame xr{};xr.focused=true;xr.move={1,1};xr.hands[1].primary=true;
+            XINPUT_STATE physical{},output{};
+            physical.Gamepad.wButtons=XINPUT_GAMEPAD_A|XINPUT_GAMEPAD_X;
+            physical.Gamepad.sThumbLX=32767;physical.Gamepad.bRightTrigger=255;
+            menu.publish(xr,100);
+            menu.state(0,&output,ERROR_SUCCESS,physical,101,false,true,true,true);
+            const XINPUT_GAMEPAD neutral{};
+            require(std::memcmp(&output.Gamepad,&neutral,sizeof(neutral))==0,
+                "F10 settings leaked physical or XR gameplay inputs");
+            menu.state(1,&output,ERROR_SUCCESS,physical,102,false,true,true,true);
+            require(std::memcmp(&output.Gamepad,&neutral,sizeof(neutral))==0,
+                "F10 settings leaked another connected physical controller");
+            require(menu.state(1,&output,ERROR_DEVICE_NOT_CONNECTED,physical,103,false,true,true,true)==
+                ERROR_DEVICE_NOT_CONNECTED,"F10 settings connected an absent secondary pad");
+            menu.publish({},110);
+            menu.state(0,&output,ERROR_SUCCESS,physical,111);
+            require(output.Gamepad.wButtons==0,"Closing F10 activated a held physical action");
+            physical.Gamepad.wButtons=0;menu.state(0,&output,ERROR_SUCCESS,physical,112);
+            physical.Gamepad.wButtons=XINPUT_GAMEPAD_A;menu.state(0,&output,ERROR_SUCCESS,physical,113);
+            require(output.Gamepad.wButtons==XINPUT_GAMEPAD_A,"Physical actions did not recover after release");
+        }
         OutlastMotionControls controls;
         XINPUT_STATE output{},physical{};
         require(controls.state(0,&output,ERROR_DEVICE_NOT_CONNECTED,physical,1)==ERROR_SUCCESS &&

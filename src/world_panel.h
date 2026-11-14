@@ -163,6 +163,11 @@ public:
         const StereoViewConstants& eyes) {
         compose(&source,output,nullptr,width,height,eyes,false,false,false);
     }
+    void draw_overlay(IDirect3DTexture9& source,IDirect3DSurface9& output,UINT width,UINT height,
+        const StereoViewConstants& eyes) {
+        compose(&source,output,nullptr,width,height,eyes,false,false,false,-1,nullptr,
+            nullptr,0,false,true);
+    }
     void draw_pointer(IDirect3DSurface9& output,UINT width,UINT height,
         const StereoViewConstants& eyes,Vec3 origin,Vec3 end,bool hit) {
         const auto delta=add(end,scale(origin,-1));
@@ -211,7 +216,7 @@ private:
     void compose(IDirect3DTexture9* source,IDirect3DSurface9& output,IDirect3DSurface9* world_depth,
         UINT width,UINT height,const StereoViewConstants& eyes,bool screen,bool housing,bool night_vision,
         float battery=-1,IDirect3DTexture9* native_hud=nullptr,
-        const Vec3* pointer=nullptr,UINT pointer_count=0,bool pointer_hit=false) {
+        const Vec3* pointer=nullptr,UINT pointer_count=0,bool pointer_hit=false,bool overlay=false) {
         StateRestore state(device_,caller_state_);
         D3DCAPS9 caps{};
         gpu_check(device_.GetDeviceCaps(&caps),"Inspect panel target slots");
@@ -247,14 +252,14 @@ private:
                 {D3DRS_CULLMODE,D3DCULL_NONE},{D3DRS_FILLMODE,D3DFILL_SOLID},
                 {D3DRS_COLORWRITEENABLE,15},{D3DRS_SRGBWRITEENABLE,FALSE}})
                 gpu_check(device_.SetRenderState(setting.first,setting.second),"Set isolated panel raster state");
-            if (!screen && !pointer)
+            if (!screen && !pointer && !overlay)
                 gpu_check(device_.Clear(0,nullptr,D3DCLEAR_TARGET,0xff000000,1,0),"Clear spatial panel surroundings");
             gpu_check(device_.SetVertexShader(vertex_.get()),"Bind spatial panel vertex");
             gpu_check(device_.SetPixelShader(pixel_.get()),"Bind spatial panel pixel");
             gpu_check(device_.SetVertexDeclaration(declaration_.get()),"Bind spatial panel geometry");
             gpu_check(device_.SetTexture(0,source),"Bind mono menu image");
             gpu_check(device_.SetTexture(1,native_hud),"Bind actual native camera movie image");
-            const float source_scale[]{screen?1.f:.5f,1,0,pointer?-2.f:housing?-1.f:0.f};
+            const float source_scale[]{screen || overlay?1.f:.5f,1,0,pointer?-2.f:housing?-1.f:0.f};
             gpu_check(device_.SetPixelShaderConstantF(0,source_scale,1),"Set explicit mono/atlas panel source layout");
             const float camera[]{night_vision?1.f:0.f,battery>=0?1.f:0.f,battery,native_hud?1.f:0.f};
             gpu_check(device_.SetPixelShaderConstantF(1,camera,1),"Set feed-only night vision");

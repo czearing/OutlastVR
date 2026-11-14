@@ -120,8 +120,9 @@ int main(int argc,char** argv) {
         gpu_check(device.CreatePixelShader(fault?pixel_driver.data():comfort_driver.data(),patched.put()),"Create comfort hit shader");
         gpu_check(device.SetVertexShader(vs.get()),"Bind hit fixture vertex");
         gpu_check(device.SetPixelShader(original.get()),"Bind native hit shader");
-        for (const bool enabled:{false,true}) {
-            D3D9ShaderVariants variants(device,enabled);
+        D3D9ShaderVariants variants(device,false);
+        for (const bool enabled:{false,true,false,true,false}) {
+            variants.hit_distortion(enabled);
             auto& pipeline=variants.current(0,false,false);
             const auto expected=sm3::patch_pair(vertex,enabled?pixel:comfort,
                 {0,false,false,false,false,false,false,0});

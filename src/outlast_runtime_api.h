@@ -4,6 +4,7 @@
 #include "outlast_config.h"
 #include "outlast_skeleton.h"
 #include "outlast_night_vision.h"
+#include "outlast_door.h"
 #include <cstdint>
 #include <xinput.h>
 #define XR_USE_PLATFORM_WIN32
@@ -74,15 +75,22 @@ struct RuntimeBindings {
     CameraUpdateEntry night_light_tick=nullptr;
     float*(WINAPI* actor_matrix)(void*,float*)=nullptr;
     void(WINAPI* light_rotation)(void*,const INT*)=nullptr;
+    OutlastDoorFind door_find=nullptr;
+    OutlastDoorAdmit door_admit=nullptr;
+    OutlastDoorOpen door_open=nullptr;
+    OutlastDoorContext door_context=nullptr;
+    NativeWorldTrace world_trace=nullptr;
+    void** native_world=nullptr;
 };
 
 struct RuntimeTestConfiguration {
     UINT size=sizeof(RuntimeTestConfiguration);
-    UINT version=14;
+    UINT version=17;
     RuntimeBindings bindings{};
     PFN_xrGetInstanceProcAddr xr_resolve=nullptr;
     Vec3 world_up{0,1,0};
     OutlastComfortSettings comfort;
+    void(WINAPI* desktop_mirror_observer)(IDirect3DDevice9*,IDirect3DSurface9*,IDirect3DSurface9*)=nullptr;
 };
 
 struct RuntimeStatistics {
@@ -114,6 +122,7 @@ struct RuntimeStatistics {
     UINT floor_reference_acquisitions=0;
     float standing_reference_m=0;
     BOOL floor_reference_ready=FALSE;
+    UINT doors_opened_without_animation=0;
 };
 
 }

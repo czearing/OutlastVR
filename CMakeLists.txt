@@ -47,7 +47,7 @@ target_include_directories(olvr_options INTERFACE src "${openxr_SOURCE_DIR}/incl
 target_compile_options(olvr_options INTERFACE -Wall -Wextra -Werror -O2
     -idirafter "${OLVR_WINDOWS_SDK_UM}")
 target_link_options(olvr_options INTERFACE -static -static-libgcc -static-libstdc++)
-target_link_libraries(olvr_options INTERFACE d3d9 d3d12 dxgi d3dcompiler_47 user32 bcrypt)
+target_link_libraries(olvr_options INTERFACE d3d9 d3d12 dxgi d3dcompiler_47 user32 gdi32 bcrypt)
 target_compile_definitions(olvr_options INTERFACE OLVR_VERSION="${PROJECT_VERSION}")
 
 add_library(olvr_stereo STATIC src/d3d9_indexed_device.cpp src/d3d9_stereo_pipeline.cpp)
@@ -58,6 +58,9 @@ target_link_libraries(OutlastVRSinglePass PRIVATE olvr_stereo minhook)
 add_executable(OutlastVRLauncher src/outlast_launcher.cpp)
 target_link_libraries(OutlastVRLauncher PRIVATE olvr_options psapi)
 target_link_options(OutlastVRLauncher PRIVATE -municode)
+add_library(OutlastVRAutoload SHARED src/outlast_autoload.cpp)
+set_target_properties(OutlastVRAutoload PROPERTIES PREFIX "" OUTPUT_NAME "d3d9")
+target_link_libraries(OutlastVRAutoload PRIVATE olvr_options)
 
 if(OLVR_BUILD_DIAGNOSTICS)
     add_library(OutlastVRHeadlessProbe SHARED src/native_probe_runtime.cpp)
@@ -72,7 +75,7 @@ if(BUILD_TESTING)
     include(cmake/Tests.cmake)
 endif()
 
-install(TARGETS OutlastVRSinglePass OutlastVRLauncher openxr_loader
+install(TARGETS OutlastVRSinglePass OutlastVRLauncher OutlastVRAutoload openxr_loader
     RUNTIME DESTINATION . COMPONENT Runtime
     LIBRARY DESTINATION . COMPONENT Runtime)
 install(FILES config/OutlastVR.ini README.md LICENSE THIRD_PARTY_NOTICES.md

@@ -11,7 +11,8 @@ int main(int argc,char** argv) {
         const bool fault=argc==2 && std::string(argv[1])=="--fault-headlocked";
         const bool mono=argc==2 && std::string(argv[1])=="--fault-mono";
         const bool canted=argc==2 && std::string(argv[1])=="--canted";
-        if (argc!=1 && !fault && !mono && !canted) throw std::invalid_argument("Unknown spatial panel control");
+        const bool overlay=argc==2 && std::string(argv[1])=="--overlay";
+        if (argc!=1 && !fault && !mono && !canted && !overlay) throw std::invalid_argument("Unknown spatial panel control");
         constexpr UINT width=128,height=96,source_width=160,source_height=90;
         IsolatedDevice isolated(width*2,height);
         auto& device=*isolated.device.get();
@@ -21,10 +22,10 @@ int main(int argc,char** argv) {
         D3DLOCKED_RECT lock{};
         gpu_check(source->LockRect(0,&lock,nullptr,0),"Lock panel image fixture");
         for (UINT y=0;y<source_height;++y) for (UINT x=0;x<source_width*2;++x) {
-            const UINT r=UINT(std::lround(13+220*(x+.5)/source_width));
+            const UINT r=UINT(std::lround(13+220*(x+.5)/(overlay?source_width*2:source_width)));
             const UINT g=UINT(std::lround(13+220*(y+.5)/source_height));
             reinterpret_cast<DWORD*>(static_cast<char*>(lock.pBits)+y*lock.Pitch)[x]=
-                x<source_width?(0xff000020|(r<<16)|(g<<8)):0xffff00ff;
+                overlay || x<source_width?(0xff000020|(r<<16)|(g<<8)):0xffff00ff;
         }
         gpu_check(source->UnlockRect(0),"Unlock panel image fixture");
         Com<IDirect3DSurface9> output,readback;
@@ -77,7 +78,10 @@ int main(int argc,char** argv) {
 #ifdef OLVR_ISOLATED_9ON12
             counter.reset();
 #endif
-            renderer.draw(*source.get(),*output.get(),width,height,matrices);
+            if (overlay) {
+                gpu_check(device.ColorFill(output.get(),nullptr,0xff17334f),"Seed native scene behind settings overlay");
+                renderer.draw_overlay(*source.get(),*output.get(),width,height,matrices);
+            } else renderer.draw(*source.get(),*output.get(),width,height,matrices);
             DWORD after_wrapping=0;
             gpu_check(device.GetRenderState(D3DRS_WRAP0,&after_wrapping),"Inspect restored panel wrapping");
             if (after_wrapping!=wrapping) throw std::runtime_error("Panel changed native caller wrapping");
@@ -111,10 +115,11 @@ int main(int argc,char** argv) {
                         std::abs(int((color>>8)&255)-g)<=2 && (color&255)==32;
                     ++tested;
                 } else if (u<-.05 || u>1.05 || v<-.05 || v>1.05 || t<0) {
-                    if (correct && color!=0xff000000)
+                    const DWORD background=overlay?0xff17334f:0xff000000;
+                    if (correct && color!=background)
                         std::cerr<<"Panel outside mismatch frame="<<frame<<" x="<<x<<" y="<<y
                             <<" uv="<<u<<','<<v<<" actual="<<std::hex<<color<<std::dec<<'\n';
-                    correct &= color==0xff000000;
+                    correct &= color==background;
                     ++outside;
                 }
             }

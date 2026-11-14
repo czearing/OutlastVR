@@ -5,6 +5,37 @@
 #include <optional>
 
 namespace olvr {
+class OutlastBodyFollow {
+    float yaw_=0;
+    bool following_=false;
+    UINT64 clock_=0;
+    std::uintptr_t hero_=0;
+public:
+    void reset() {*this=OutlastBodyFollow{};}
+    float update(bool enabled,float deadzone,Quaternion head,std::uintptr_t hero,UINT64 now) {
+        if (!std::isfinite(deadzone) || deadzone<10 || deadzone>90)
+            throw std::invalid_argument("Invalid body-follow deadzone");
+        const auto forward=rotate(head,{0,0,-1});
+        if (!finite(forward)) throw std::invalid_argument("Nonfinite body-follow orientation");
+        if (!enabled || !hero) {reset();return 0;}
+        if (hero!=hero_ || !clock_ || now<clock_ || now-clock_>250000) {
+            reset();hero_=hero;clock_=now;return 0;
+        }
+        const float elapsed=float(now-clock_)/1000000;
+        clock_=now;
+        // Looking straight up/down has no stable horizontal heading.
+        if (forward.x*forward.x+forward.z*forward.z<.000001f) return yaw_;
+        const float desired=std::atan2(-forward.x,-forward.z);
+        const float delta=std::remainder(desired-yaw_,6.28318530718f);
+        if (std::abs(delta)>deadzone*.01745329252f) following_=true;
+        if (following_) {
+            const float step=std::clamp(delta,-6.28318530718f*elapsed,6.28318530718f*elapsed);
+            yaw_=std::remainder(yaw_+step,6.28318530718f);
+            if (std::abs(delta-step)<.0001f) following_=false;
+        }
+        return yaw_;
+    }
+};
 class OutlastComfort {
     float yaw_=0,head_y_=0;
     Vec3 offset_{};

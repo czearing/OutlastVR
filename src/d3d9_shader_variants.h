@@ -49,6 +49,7 @@ class D3D9ShaderVariants {
     struct PixelSamplers {
         Com<IDirect3DPixelShader9> original;
         unsigned declared=0,two_dimensional=0;
+        OutlastEffectConstants effects;
     };
     struct MonoVariant {
         Com<IDirect3DPixelShader9> original,pixel;
@@ -67,6 +68,7 @@ class D3D9ShaderVariants {
     std::unordered_map<IDirect3DVertexShader9*,std::unique_ptr<VertexInfo>> vertex_info_;
     D3D9PointAtlasLookup mono_point_atlas_;
     bool hit_distortion_=true;
+    bool bloom_=true,film_grain_=true;
     template<class T> static sm3::Words bytecode(T& shader) {
         UINT size=0;
         gpu_check(shader.GetFunction(nullptr,&size),"Read bound shader extent");
@@ -83,7 +85,9 @@ class D3D9ShaderVariants {
         if (found==pixel_samplers_.end()) {
             auto usage=std::make_unique<PixelSamplers>();
             *usage->original.put()=&pixel;pixel.AddRef();
-            for (const auto& instruction:sm3::parse(bytecode(pixel)))
+            const auto code=bytecode(pixel);
+            usage->effects=outlast_effect_constants(code,bloom_,film_grain_);
+            for (const auto& instruction:sm3::parse(code))
                 if (instruction.opcode==31 && sm3::kind(instruction.tokens[2])==10) {
                     const auto index=sm3::index(instruction.tokens[2]);
                     if (index>=16) throw std::invalid_argument("Pixel sampler exceeds the native SM3 range");
@@ -129,6 +133,16 @@ class D3D9ShaderVariants {
         if (!metadata) throw std::runtime_error("Cannot retain rejected native shader configuration");
     }
 public:
+    void effects(bool bloom,bool film_grain) {
+        if (bloom_==bloom && film_grain_==film_grain) return;
+        cache_.clear();mono_cache_.clear();pixel_samplers_.clear();
+        bloom_=bloom;film_grain_=film_grain;
+    }
+    void hit_distortion(bool enabled) {
+        if (hit_distortion_==enabled) return;
+        cache_.clear();mono_cache_.clear();
+        hit_distortion_=enabled;
+    }
     std::uint64_t state_allocations() const {return state_cache_->allocations;}
     std::uint64_t state_captures() const {return state_cache_->captures;}
     explicit D3D9ShaderVariants(IDirect3DDevice9& device,bool hit_distortion=true):
@@ -154,16 +168,17 @@ public:
         Com<IDirect3DPixelShader9> pixel;
         gpu_check(device_->GetPixelShader(pixel.put()),"Read native mono resolve shader");
         unsigned samplers=0;
+        const PixelSamplers* usage=nullptr;
         if (pixel.get()) {
-            const auto& usage=sampler_usage(*pixel.get());
-            samplers=checked_atlas_samplers(atlas_sampler_mask(*device_.get(),usage.declared),usage);
+            usage=&sampler_usage(*pixel.get());
+            samplers=checked_atlas_samplers(atlas_sampler_mask(*device_.get(),usage->declared),*usage);
         }
         Com<IDirect3DSurface9> target;
         OutlastAtlasTag tag{};
         if (logical_atlas_output)
             gpu_check(device_->GetRenderTarget(0,target.put()),"Read native mono destination");
         const bool atlas_output=target.get() && atlas_tag(*target.get(),tag);
-        if (!samplers && !atlas_output) return draw();
+        if (!samplers && !atlas_output && (!usage || usage->effects.empty())) return draw();
         MonoVariant* variant=nullptr;
         if (samplers) {
             const auto points=native_point_atlas_samplers(*device_.get(),samplers);
@@ -208,6 +223,7 @@ public:
             const float binding[]{.5f,0,texel,.5f-texel};
             gpu_check(device_->SetPixelShaderConstantF(entry.second,binding,1),"Map native mono UVs into their rendered view");
         }
+        if (usage) outlast_apply_effect_constants(*device_.get(),usage->effects);
         const auto result=draw();
         const auto restored=restore.apply();
         return FAILED(result)?result:restored;
@@ -268,6 +284,7 @@ public:
         gpu_check(pixel_status,"Create joint native stereo pixel variant");
         StereoShaderBinding bindings{
             variant->vertex.get(),variant->pixel.get(),patched.input_semantic,patched.sampler,patched.guard};
+        bindings.effect_constants=sampler_usage(*pixel.get()).effects;
         bindings.atlas_sampler_constants=patched.atlas_sampler_constants;
         bindings.atlas_point_samplers=patched.atlas_point_samplers;
         bindings.pixel_position_constant=patched.pixel_position_constant;

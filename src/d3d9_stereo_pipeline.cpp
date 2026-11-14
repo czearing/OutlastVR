@@ -205,6 +205,7 @@ IDirect3DStateBlock9& D3D9StereoPipeline::prepare_caller_state() {
         constant(pixel_constants,row.left,224);
         constant(pixel_constants,row.right,224);
     }
+    for (const auto& entry:shaders_.effect_constants) constant(pixel_constants,int(entry.first),224);
     if (shaders_.vertex_texture) samplers.push_back(D3DVERTEXTEXTURESAMPLER0+shaders_.vertex_sampler);
     if (shaders_.pixel_view_sampler>=0) samplers.push_back(UINT(shaders_.pixel_view_sampler));
     for (const auto& entry:shaders_.atlas_point_samplers) samplers.push_back(entry.second);
@@ -850,6 +851,7 @@ SubmissionResult D3D9StereoPipeline::draw_indexed_preserving(const Draw& draw,
         gpu_check(device_->SetPixelShaderConstantF(shaders_.camera_base_constant,center,1),"Bind tracked pixel camera center");
         gpu_check(device_->SetPixelShaderConstantF(shaders_.camera_delta_constant,delta,1),"Bind per-eye pixel camera separation");
     }
+    outlast_apply_effect_constants(*device_.get(),shaders_.effect_constants);
     D3D9IndexedDevice native(*device_.get());
     auto result = submit_indexed_stereo(native, plan, draw);
     const auto status = restore.apply();

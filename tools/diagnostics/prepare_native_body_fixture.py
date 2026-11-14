@@ -18,13 +18,13 @@ def main():
         row for row in rows
         if row["basic"] == 0 and row["special"] == 0 and len(row["atoms"]) == 73
         and row["atoms"][8][6] > 145 and not row.get("ik_hands", 0)
-        and len(row["bindings"]) == 20
+        and len(row["bindings"]) in (20, 36)
         and all(binding["index"] >= 0 and binding["matrix_error"] == 0 for binding in row["bindings"])
     ]
     if not candidates:
         raise ValueError("Capture has no unmodified standing 73-bone hero with exact native matrix agreement")
     row = candidates[-1]
-    indices = [binding["index"] for binding in row["bindings"]]
+    indices = [binding["index"] for binding in row["bindings"][:20]]
     data = struct.pack("<QI20i", 0x314B49524C4F, len(row["atoms"]), *indices)
     data += struct.pack("<" + "i" * len(row["parents"]), *row["parents"])
     data += struct.pack("<16f", *row["world"])

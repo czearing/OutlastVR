@@ -26,7 +26,7 @@ $readmeText = [IO.File]::ReadAllText($readme).Replace(
     'https://github.com/czearing/OutlastVR/blob/master/',
     "https://github.com/czearing/OutlastVR/blob/$($commit.Trim())/")
 [IO.File]::WriteAllText($readme, $readmeText, [Text.UTF8Encoding]::new($false))
-$expected = @('OutlastVRLauncher.exe','OutlastVRSinglePass.dll','openxr_loader.dll',
+$expected = @('OutlastVRLauncher.exe','OutlastVRSinglePass.dll','d3d9.dll','openxr_loader.dll',
     'OutlastVR.ini','README.md','LICENSE','THIRD_PARTY_NOTICES.md',
     'licenses\MinHook.txt','licenses\OpenXR.txt','licenses\OpenXR-MIT.txt','licenses\JsonCpp.txt',
     'licenses\Winpthreads.txt')

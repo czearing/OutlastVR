@@ -38,7 +38,12 @@ float crosshair_elapsed=0;
 bool thread_handoff=false,thread_overlap=false,fault_reset_thread=false,fault_reset_reentrant=false;
 bool ui_owned=false;
 bool ui_scaleform=false;
-std::array<unsigned char,0x3300> camera_hero{};
+std::array<unsigned char,0x4500> camera_hero{};
+std::array<BYTE,0x1a10> native_door{};
+std::array<void*,0x760/8> native_door_table{};
+std::array<void*,0xb08/8> native_door_hero_table{};
+bool native_door_ready=false;
+unsigned native_door_admit_calls=0,native_door_open_calls=0;
 std::array<unsigned char,0x240> camera_object{};
 std::array<unsigned char,0x100> camera_mesh{};
 std::array<unsigned char,0x150> lean_node{};
@@ -58,6 +63,7 @@ struct {MoviePlaying* vtable;} native_movie_object{native_movie_vtable.data()};
 void* native_movie_player=&native_movie_object;
 const wchar_t* native_movie_name=L"Intro";
 unsigned native_movie_queries=0;
+unsigned desktop_mirror_checks=0;
 std::array<float,6> camera_base_pose{};
 float native_lean_weight=0;
 std::array<unsigned char,500*4> native_gamepads{};
@@ -86,6 +92,42 @@ XrResult XRAPI_CALL mono_resolve(XrInstance instance,const char* name,PFN_xrVoid
     return resolve(instance,name,output);
 }
 void require(bool condition,const std::string& text) {if (!condition) throw std::runtime_error(text);}
+void WINAPI observe_desktop_mirror(IDirect3DDevice9* device,IDirect3DSurface9* source,
+                                   IDirect3DSurface9* desktop) {
+    Com<IDirect3DSwapChain9> chain;
+    Com<IDirect3DSurface9> current,source_copy,desktop_copy;
+    gpu_check(device->GetSwapChain(0,chain.put()),"Observe native desktop presentation chain");
+    gpu_check(chain->GetBackBuffer(0,D3DBACKBUFFER_TYPE_MONO,current.put()),
+        "Observe real unredirected desktop surface");
+    require(current.get()==desktop && desktop!=source,"Mirror wrote to an atlas or stale desktop surface");
+    D3DPRESENT_PARAMETERS presentation{};
+    gpu_check(chain->GetPresentParameters(&presentation),"Observe spectator window mode");
+    require(presentation.Windowed && !presentation.FullScreen_RefreshRateInHz,
+        "VR spectator retained focus-dependent exclusive fullscreen");
+    D3DSURFACE_DESC a{},b{};
+    gpu_check(source->GetDesc(&a),"Read real mirror source extent");
+    gpu_check(desktop->GetDesc(&b),"Read real desktop extent");
+    require(a.Width==b.Width*2 && a.Height==b.Height,"Unexpected mirror eye dimensions");
+    gpu_check(device->CreateOffscreenPlainSurface(a.Width,a.Height,a.Format,D3DPOOL_SYSTEMMEM,
+        source_copy.put(),nullptr),"Create mirror source observation");
+    gpu_check(device->CreateOffscreenPlainSurface(b.Width,b.Height,b.Format,D3DPOOL_SYSTEMMEM,
+        desktop_copy.put(),nullptr),"Create actual desktop observation");
+    gpu_check(device->GetRenderTargetData(source,source_copy.get()),"Observe rendered eye pixels");
+    gpu_check(device->GetRenderTargetData(desktop,desktop_copy.get()),"Observe displayed spectator pixels");
+    D3DLOCKED_RECT left{},mirror{};
+    gpu_check(source_copy->LockRect(&left,nullptr,D3DLOCK_READONLY),"Lock mirror source observation");
+    gpu_check(desktop_copy->LockRect(&mirror,nullptr,D3DLOCK_READONLY),"Lock desktop observation");
+    bool equal=true;
+    for (UINT y=0;y<b.Height;++y) for (UINT x=0;x<b.Width;++x) {
+        const auto* expected=reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(left.pBits)+y*left.Pitch);
+        const auto* actual=reinterpret_cast<const DWORD*>(static_cast<const BYTE*>(mirror.pBits)+y*mirror.Pitch);
+        equal&=(expected[x]&0xffffff)==(actual[x]&0xffffff);
+    }
+    gpu_check(desktop_copy->UnlockRect(),"Unlock desktop observation");
+    gpu_check(source_copy->UnlockRect(),"Unlock mirror source observation");
+    require(equal,"Actual desktop backbuffer differs from the rendered left eye");
+    ++desktop_mirror_checks;
+}
 void check_desktop_pacing() {
     Com<IDirect3DSwapChain9> chain;
     gpu_check(integrated_device->GetSwapChain(0,chain.put()),"Read actual native presentation chain");
@@ -201,6 +243,37 @@ NATIVE void* WINAPI hero_cast_stub(void* actor) {
     // Native helper calls may overwrite volatile floating-point argument registers.
     asm volatile("pxor %%xmm1, %%xmm1" ::: "xmm1");
     return actor==camera_hero.data()?actor:nullptr;
+}
+NATIVE INT WINAPI door_context_stub(void*) {
+    asm volatile("nop;nop;nop;nop;nop");
+    return 1;
+}
+NATIVE INT WINAPI door_allowed_stub(void*,UINT action) {
+    asm volatile("nop;nop;nop;nop;nop");
+    require(action==0x1c,"Native door movement eligibility changed");
+    return 1;
+}
+NATIVE float WINAPI door_angle_stub(void* door) {
+    asm volatile("nop;nop;nop;nop;nop");
+    return pickup_field<float>(door,0x1908)*90.f;
+}
+NATIVE void* WINAPI door_find_stub(void* hero) {
+    asm volatile("nop;nop;nop;nop;nop");
+    require(hero==camera_hero.data(),"Native door selector lost its owning hero");
+    return native_door_ready?native_door.data():nullptr;
+}
+NATIVE UINT64 WINAPI door_admit_stub(void* hero) {
+    asm volatile("nop;nop;nop;nop;nop");
+    ++native_door_admit_calls;
+    require(hero==camera_hero.data(),"Native animated admission lost its hero");
+    return 0;
+}
+NATIVE void WINAPI door_open_stub(void* door,void* hero,float speed,float angle,INT silent) {
+    asm volatile("nop;nop;nop;nop;nop");
+    require(door==native_door.data() && hero==camera_hero.data() && speed==0 && angle==0 && silent==0,
+        "Native actor opening lost authored speed, full-open target or sound/events");
+    ++native_door_open_calls;
+    write(door,0x190c,1.f);
 }
 UINT64 WINAPI menu_state_stub() {return 0;}
 void check_native_effect(void* effects) {
@@ -617,7 +690,8 @@ int main(int argc,char** argv) {
             mode=="--loading-blackout" || mode=="--loading-upload-blackout" ||
             mode=="--fault-loading-blackout" || mode=="--material-constants" ||
             mode=="--fault-material-constants" || mode=="--fault-headset-light" ||
-            mode=="--fault-frame-pacing")),
+            mode=="--fault-frame-pacing" || mode=="--door-no-animation" ||
+            mode=="--fault-door-no-animation")),
             "Usage: test_integrated_mod.exe mod.dll retail.exe [--fault-dual|--fault-mono|--thread-handoff|--thread-overlap|--ui|--fault-reset-thread|--fault-reset-reentrant]");
         fault_dual=mode=="--fault-dual" || mode=="--fault-ui-dual";
         fault_flat_mono=mode=="--fault-flat-mono";
@@ -629,6 +703,7 @@ int main(int argc,char** argv) {
         const bool input_chords=mode=="--input-chords";
         const bool input_recovery=mode=="--input-recovery";
         const bool reset_retry=mode=="--reset-retry";
+        const bool door_no_animation=mode=="--door-no-animation" || mode=="--fault-door-no-animation";
         const bool flat_wrap=mode=="--flat-wrap";
         mock.flat_test=mode=="--flat-transitions" || flat_upload || fault_flat_mono || flat_wrap || loading_blackout;
         mock.dynamic_ipd=mode=="--ipd-cycle";
@@ -662,6 +737,7 @@ int main(int argc,char** argv) {
         const auto error=exported<LastError>(dll,"OutlastVR_LastError");
         shutdown=exported<Shutdown>(dll,"OutlastVR_Shutdown");
         RuntimeTestConfiguration config{};
+        config.desktop_mirror_observer=&observe_desktop_mirror;
         const bool snap_recovery=mode=="--snap-recovery";
         const bool snap_mode=mode=="--snap" || mode=="--fault-snap" || snap_recovery;
         if (snap_mode) {
@@ -695,6 +771,12 @@ int main(int argc,char** argv) {
         config.bindings.camera_update=&camera_update_stub;
         config.bindings.lean_tick=&lean_tick_stub;
         config.bindings.hero_cast=&hero_cast_stub;
+        if (mode!="--fault-door-no-animation") {
+            config.bindings.door_find=&door_find_stub;
+            config.bindings.door_admit=&door_admit_stub;
+            config.bindings.door_open=&door_open_stub;
+            config.bindings.door_context=&door_context_stub;
+        }
         config.bindings.skeleton_evaluate=&skeleton_stub;
         config.bindings.night_vision_engine=&native_engine_pointer;
         config.bindings.menu_state=&menu_state_stub;
@@ -724,6 +806,16 @@ int main(int argc,char** argv) {
         write(camera_hero.data(),0x360,165.f);
         write(camera_hero.data(),0x444,camera_mesh.data());
         write(camera_hero.data(),0x2bbc,native_controller.data());
+        native_door_table[0x758/8]=reinterpret_cast<void*>(&door_angle_stub);
+        native_door_hero_table[0xb00/8]=reinterpret_cast<void*>(&door_allowed_stub);
+        write(camera_hero.data(),0,native_door_hero_table.data());
+        write(native_door.data(),0,native_door_table.data());
+        write(native_door.data(),0x2bc,90.f);
+        write(native_door.data(),0x2c4,UINT(1));
+        write(camera_hero.data(),0x43c4,30.f);
+        write(camera_hero.data(),0x43a8,200.f);
+        write(camera_hero.data(),0x43c8,200.f);
+        write(camera_hero.data(),0x43c0,90.f);
         write(native_controller.data(),0xa84,UINT(2));
         write(native_engine.data(),0xa74,native_effects.data());
         write(native_engine.data(),0x3f8,UINT(0xa5a50200));
@@ -1119,6 +1211,24 @@ int main(int argc,char** argv) {
             }
             if (f==11) native_engine_pointer=recreated_engine.data();
             input_tick_stub(nullptr,.015f);
+            if (door_no_animation && f==12) {
+                native_door_ready=true;
+                const auto before=camera_hero;
+                require(door_admit_stub(camera_hero.data())==1 &&
+                    native_door_admit_calls==0 && native_door_open_calls==1,
+                    "Production door opening entered player animation instead of the native actor");
+                require(camera_hero==before && pickup_field<float>(native_door.data(),0x1908)==0 &&
+                    pickup_field<float>(native_door.data(),0x190c)==1,
+                    "Production door opening moved the hero/camera or teleported the door instead of setting its native target");
+                write(native_door.data(),0x2c4,UINT(3));
+                require(door_admit_stub(camera_hero.data())==0 && native_door_admit_calls==1 &&
+                    native_door_open_calls==1,"Locked door did not retain original admission");
+                RuntimeStatistics counts{};
+                require(statistics(&counts)!=FALSE && counts.doors_opened_without_animation==1,
+                    "Production native door opening was not exercised");
+                std::cout<<"PASS: production_door_no_animation; native_selection_and_actor_open; "
+                    "unchanged_hero_and_camera; no_door_teleport; locked_door_preserved\n";
+            }
             native_engine_pointer=native_engine.data();
             const auto poses_before=light_pose_calls,ticks_before=light_ticks;
             light_tick_stub(camera_hero.data(),.015f);
@@ -1254,6 +1364,10 @@ int main(int argc,char** argv) {
         std::cout<<"PASS: native_motion_polls=20; XR_actions_to_game_input; cached_presence_seeded; "
             <<"focused_axes_buttons; unavailable_body_use_suppressed; focus_and_skipped_frames_neutral; unrelated_pad_preserved\n";
         RuntimeStatistics counts{};require(statistics(&counts)!=FALSE,"Cannot read integrated mod counters");
+        require(desktop_mirror_checks==counts.frames && desktop_mirror_checks==20,
+            "The actual desktop swapchain was not independently checked on every presented frame");
+        std::cout<<"PASS: actual_desktop_backbuffer; windowed_compositor_ownership; "
+            "left_eye_RGB_pixel_agreement; checked_frames="<<desktop_mirror_checks<<"\n";
         if (loading_blackout)
             require(native_movie_queries==19 && mock.loading_blackout_pixels==786432 && loading_mirror_checks==8,
                 "Loading blackout missed native named-movie queries, opaque pixels or automatic recovery");

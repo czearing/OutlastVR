@@ -124,7 +124,9 @@ public:
         wait_until(serial_,timeout_ms);
     }
 
-    UINT64 copy(IDirect3DTexture9& atlas, const std::array<D3D12EyeTarget, 2>& eyes) {
+    UINT64 copy(IDirect3DTexture9& atlas, const std::array<D3D12EyeTarget, 2>& eyes, UINT eye_count=2) {
+        if (eye_count!=1 && eye_count!=2)
+            throw std::invalid_argument("GPU copy requires one desktop eye or two XR eyes");
         if (poisoned_)
             throw std::runtime_error("GPU stereo transfer is poisoned; recreate the device/session");
         D3DSURFACE_DESC description{};
@@ -135,9 +137,12 @@ public:
             description.Pool != D3DPOOL_DEFAULT)
             throw std::invalid_argument("Stereo transport requires a non-MSAA BGRA8 default-pool render atlas");
         const UINT width = description.Width / 2, height = description.Height;
-        for (const auto& eye : eyes) {
-            if (!eye.resource || eye.acquired_state != D3D12_RESOURCE_STATE_RENDER_TARGET)
-                throw std::invalid_argument("Eye image must be acquired and writable in RENDER_TARGET state");
+        const auto expected_state=eye_count==1?D3D12_RESOURCE_STATE_PRESENT:D3D12_RESOURCE_STATE_RENDER_TARGET;
+        for (UINT index=0;index<eye_count;++index) {
+            const auto& eye=eyes[index];
+            if (!eye.resource || eye.acquired_state != expected_state)
+                throw std::invalid_argument(eye_count==1?"Desktop image must be acquired in PRESENT state":
+                    "Eye image must be acquired and writable in RENDER_TARGET state");
             require_device(*eye.resource);
             const auto target = eye.resource->GetDesc();
             if (target.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || target.Width != width ||
@@ -154,7 +159,7 @@ public:
                     "; format="+std::to_string(target.Format)+"; mips="+std::to_string(target.MipLevels)+
                     "; layers="+std::to_string(target.DepthOrArraySize)+"; flags="+std::to_string(target.Flags));
         }
-        if (eyes[0].resource == eyes[1].resource && eyes[0].subresource == eyes[1].subresource)
+        if (eye_count==2 && eyes[0].resource == eyes[1].resource && eyes[0].subresource == eyes[1].subresource)
             throw std::invalid_argument("Left and right eyes cannot overwrite the same image subresource");
         if (serial_ == std::numeric_limits<UINT64>::max() - 1)
             throw std::overflow_error("Stereo ownership fence exhausted");
@@ -174,15 +179,15 @@ public:
                 source_description.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
                 source_description.SampleDesc.Count != 1)
                 throw std::runtime_error("Translated atlas identity or description changed");
-            for (const auto& eye : eyes)
-                if (source.get() == eye.resource)
+            for (UINT eye=0;eye<eye_count;++eye)
+                if (source.get() == eyes[eye].resource)
                     throw std::invalid_argument("An eye image cannot alias the source atlas");
             auto source_barrier = transition(source.get(), 0, D3D12_RESOURCE_STATE_COMMON,
                                              D3D12_RESOURCE_STATE_COPY_SOURCE);
             commands->ResourceBarrier(1, &source_barrier);
-            for (UINT eye = 0; eye < 2; ++eye) {
+            for (UINT eye = 0; eye < eye_count; ++eye) {
                 auto barrier = transition(eyes[eye].resource, eyes[eye].subresource,
-                                          D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+                                          eyes[eye].acquired_state, D3D12_RESOURCE_STATE_COPY_DEST);
                 commands->ResourceBarrier(1, &barrier);
                 D3D12_TEXTURE_COPY_LOCATION from{}, to{};
                 from.pResource = source.get();
@@ -193,7 +198,7 @@ public:
                 const D3D12_BOX region{eye * width, 0, 0, (eye + 1) * width, height, 1};
                 commands->CopyTextureRegion(&to, 0, 0, 0, &from, &region);
                 barrier = transition(eyes[eye].resource, eyes[eye].subresource,
-                                     D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                                     D3D12_RESOURCE_STATE_COPY_DEST, eyes[eye].acquired_state);
                 commands->ResourceBarrier(1, &barrier);
             }
             source_barrier = transition(source.get(), 0, D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -204,7 +209,7 @@ public:
             atlas.AddRef();
             *flight.source.put() = source.get();
             source->AddRef();
-            for (UINT eye = 0; eye < 2; ++eye) {
+            for (UINT eye = 0; eye < eye_count; ++eye) {
                 *flight.eyes[eye].put() = eyes[eye].resource;
                 eyes[eye].resource->AddRef();
             }

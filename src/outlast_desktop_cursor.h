@@ -8,6 +8,7 @@
 #include <optional>
 #include <cmath>
 #include <array>
+#include <exception>
 
 namespace olvr {
 inline POINT outlast_menu_source_point(float u,float v,UINT width,UINT height) {
@@ -111,18 +112,59 @@ public:
 };
 
 class OutlastWindowCursor {
-    inline static std::mutex instance_mutex_;
+    inline static std::recursive_mutex instance_mutex_;
     inline static OutlastWindowCursor* instance_=nullptr;
     HWND window_;
     const OutlastDesktopCursor& policy_;
     bool(WINAPI* focused_client_)(HWND);
     HHOOK hook_=nullptr;
+    HHOOK input_hook_=nullptr;
+    bool(WINAPI* settings_open_)()=nullptr;
+    UINT desktop_message_=0;
+    bool desktop_pending_=false;
+    std::exception_ptr desktop_error_;
+    void park_on_ui_thread() {
+        RECT area{};
+        if (!GetClientRect(window_,&area)) throw std::runtime_error("Cannot inspect native desktop frame");
+        const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
+        const auto parked_style=(style|WS_EX_TOOLWINDOW)&~LONG_PTR(WS_EX_APPWINDOW);
+        if (!AdjustWindowRectEx(&area,DWORD(GetWindowLongPtrW(window_,GWL_STYLE)),
+            GetMenu(window_)!=nullptr,DWORD(parked_style)))
+            throw std::runtime_error("Cannot preserve native desktop client extent");
+        SetLastError(0);
+        if (!SetWindowLongPtrW(window_,GWL_EXSTYLE,parked_style) &&
+            GetLastError()!=0)
+            throw std::runtime_error("Cannot remove the duplicate native taskbar frame");
+        const int x=GetSystemMetrics(SM_XVIRTUALSCREEN)-(area.right-area.left)-32;
+        if (!SetWindowPos(window_,nullptr,x,GetSystemMetrics(SM_YVIRTUALSCREEN),
+            area.right-area.left,area.bottom-area.top,SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED))
+            throw std::runtime_error("Cannot park the redundant native desktop frame");
+    }
+    static LRESULT CALLBACK queued(int code,WPARAM removed,LPARAM data) {
+        if (code>=0 && removed==PM_REMOVE) {
+            std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
+            auto* self=instance_;
+            auto& event=*reinterpret_cast<MSG*>(data);
+            if (self && event.hwnd==self->window_ && event.message==self->desktop_message_) {
+                event.message=WM_NULL;
+                self->desktop_pending_=false;
+                try {self->park_on_ui_thread();}
+                catch (...) {self->desktop_error_=std::current_exception();}
+            }
+            if (self && event.hwnd==self->window_ && self->settings_open_ &&
+                self->settings_open_() &&
+                ((event.message>=WM_KEYFIRST && event.message<=WM_KEYLAST) ||
+                 (event.message>=WM_MOUSEFIRST && event.message<=WM_MOUSELAST)))
+                event.message=WM_NULL;
+        }
+        return CallNextHookEx(nullptr,code,removed,data);
+    }
     static LRESULT CALLBACK returned(int code,WPARAM message,LPARAM data) {
         const auto result=CallNextHookEx(nullptr,code,message,data);
         if (code<0) return result;
         const auto& event=*reinterpret_cast<const CWPRETSTRUCT*>(data);
         if (event.message!=WM_SETCURSOR || LOWORD(event.lParam)!=HTCLIENT) return result;
-        std::lock_guard<std::mutex> lock(instance_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
         const auto* self=instance_;
         if (self) {
             if (event.hwnd==self->window_ && self->focused_client_(self->window_) &&
@@ -133,12 +175,15 @@ class OutlastWindowCursor {
     }
 public:
     OutlastWindowCursor(HWND window,const OutlastDesktopCursor& policy,
-        bool(WINAPI* focused_client)(HWND)):window_(window),policy_(policy),focused_client_(focused_client) {
+        bool(WINAPI* focused_client)(HWND),bool(WINAPI* settings_open)()=nullptr):
+        window_(window),policy_(policy),focused_client_(focused_client),settings_open_(settings_open) {
         DWORD process=0;
         const auto thread=GetWindowThreadProcessId(window,&process);
         if (!window || !focused_client || !thread || process!=GetCurrentProcessId())
             throw std::invalid_argument("Menu cursor hook requires an owned native window");
-        std::lock_guard<std::mutex> lock(instance_mutex_);
+        desktop_message_=RegisterWindowMessageW(L"OutlastVR.NativeDesktopHost");
+        if (!desktop_message_) throw std::runtime_error("Cannot register native desktop window policy");
+        std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
         if (instance_)
             throw std::logic_error("Native menu cursor window hook is already active");
         instance_=this;
@@ -147,12 +192,36 @@ public:
             instance_=nullptr;
             throw std::runtime_error("Cannot observe owned native cursor messages");
         }
+        input_hook_=SetWindowsHookExW(WH_GETMESSAGE,&queued,nullptr,thread);
+        if (!input_hook_) {
+            if (!UnhookWindowsHookEx(hook_)) std::terminate();
+            instance_=nullptr;
+            throw std::runtime_error("Cannot isolate native window messages");
+        }
     }
     OutlastWindowCursor(const OutlastWindowCursor&)=delete;
     OutlastWindowCursor& operator=(const OutlastWindowCursor&)=delete;
+    void park_native_desktop() {
+        std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
+        if (desktop_error_) std::rethrow_exception(desktop_error_);
+        RECT area{};
+        if (!GetWindowRect(window_,&area))
+            throw std::runtime_error("Cannot locate native desktop frame");
+        const auto style=GetWindowLongPtrW(window_,GWL_EXSTYLE);
+        if ((style&WS_EX_TOOLWINDOW) && !(style&WS_EX_APPWINDOW) &&
+            area.right<=GetSystemMetrics(SM_XVIRTUALSCREEN))
+            return;
+        // The UI can be waiting for this render thread; apply styles/moves on its own message queue.
+        if (!desktop_pending_) {
+            if (!PostMessageW(window_,desktop_message_,0,0))
+                throw std::runtime_error("Cannot queue native desktop window policy");
+            desktop_pending_=true;
+        }
+    }
     ~OutlastWindowCursor() {
+        if (input_hook_ && !UnhookWindowsHookEx(input_hook_)) std::terminate();
         if (!UnhookWindowsHookEx(hook_)) std::terminate();
-        std::lock_guard<std::mutex> lock(instance_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(instance_mutex_);
         instance_=nullptr;
     }
 };
